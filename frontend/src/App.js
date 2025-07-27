@@ -1,0 +1,312 @@
+import React, { useState, useEffect } from 'react';
+import './App.css';
+import Chat from './Chat';
+
+function App() {
+  const [trajectory, setTrajectory] = useState([]);
+  const [filteredTrajectory, setFilteredTrajectory] = useState([]);
+  const [currentIndex, setCurrentIndex] = useState(0);
+  const [fileName, setFileName] = useState('');
+  const [searchQuery, setSearchQuery] = useState('');
+  const [semanticFilter, setSemanticFilter] = useState(null);
+  const [chatKey, setChatKey] = useState(0);
+  const [fileContent, setFileContent] = useState('');
+  const [modifiedContent, setModifiedContent] = useState('');
+  const [replaceSearch, setReplaceSearch] = useState('');
+  const [replaceWith, setReplaceWith] = useState('');
+
+  const getStepText = (value, isStepZero = false) => {
+    if (!value) return '';
+    if (isStepZero) {
+        if (Array.isArray(value) && value.length > 0 && typeof value[0] === 'object' && value[0] !== null && 'text' in value[0]) {
+            return value[0].text;
+        }
+    }
+    if (typeof value === 'object' && value.text) return value.text;
+    if (typeof value === 'string') return value;
+    return '';
+  };
+
+  useEffect(() => {
+    const keywordSearchTerms = searchQuery.trim().toLowerCase().split(/\s+/).filter(Boolean);
+
+    let newFiltered = trajectory;
+
+    if (keywordSearchTerms.length > 0) {
+      newFiltered = newFiltered.filter(step => {
+        const content = step.isStepZero
+            ? getStepText(step.content, true).toLowerCase()
+            : [getStepText(step.thought), getStepText(step.action), getStepText(step.observation)]
+                .join(' ')
+                .toLowerCase();
+        return keywordSearchTerms.some(term => content.includes(term));
+      });
+    }
+
+    if (semanticFilter) {
+      const semanticIndices = new Set(semanticFilter.map(sf => sf.originalIndex));
+      newFiltered = newFiltered.filter(step => semanticIndices.has(step.originalIndex));
+      
+      // Attach reasoning to the filtered steps
+      const reasoningMap = new Map(semanticFilter.map(sf => [sf.originalIndex, sf.reasoning]));
+      newFiltered = newFiltered.map(step => ({
+        ...step,
+        reasoning: reasoningMap.get(step.originalIndex)
+      }));
+    }
+
+    setFilteredTrajectory(newFiltered);
+    setCurrentIndex(0);
+  }, [searchQuery, trajectory, semanticFilter]);
+
+  const loadTrajectory = (contentString) => {
+    try {
+      const data = JSON.parse(contentString);
+      let processedTrajectory = [];
+
+      // Handle Step 0 from history
+      if (data.history && data.history.length > 1) {
+        processedTrajectory.push({
+          ...data.history[1],
+          originalIndex: 0,
+          isStepZero: true,
+        });
+      }
+
+      // Handle the rest of the trajectory
+      if (data.trajectory && Array.isArray(data.trajectory)) {
+        const trajectoryWithOriginalIndex = data.trajectory.map((step, index) => ({
+          ...step,
+          originalIndex: index + 1
+        }));
+        processedTrajectory = [...processedTrajectory, ...trajectoryWithOriginalIndex];
+      }
+      
+      setTrajectory(processedTrajectory);
+      // Reset all filters and the chat component
+      handleClearFilters();
+      setChatKey(key => key + 1);
+    } catch (error) {
+      alert('Error parsing JSON file.');
+      console.error("File parsing error:", error);
+    }
+  };
+
+  const handleFileUpload = (event) => {
+    const file = event.target.files[0];
+    if (file) {
+      setFileName(file.name);
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        const content = e.target.result;
+        setFileContent(content);
+        setModifiedContent(''); // Clear any previous modifications
+        loadTrajectory(content);
+      };
+      reader.readAsText(file);
+    }
+  };
+
+  const handleReplace = async () => {
+    if (!replaceSearch) {
+      alert('Please enter a search term for replacement.');
+      return;
+    }
+    try {
+      const response = await fetch('http://localhost:5001/replace', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          content: modifiedContent || fileContent,
+          search_term: replaceSearch,
+          replace_term: replaceWith,
+        }),
+      });
+      const data = await response.json();
+      if (data.error) {
+        throw new Error(data.error);
+      }
+      setModifiedContent(data.modified_content);
+      loadTrajectory(data.modified_content);
+      alert('Replacement successful!');
+    } catch (error) {
+      alert(`Replacement failed: ${error.message}`);
+    }
+  };
+
+  const handleSave = async () => {
+    const newFileName = prompt("Enter new file name (e.g., 'new_trajectory.json'):", `modified_${fileName}`);
+    if (newFileName) {
+      try {
+        const response = await fetch('http://localhost:5001/save', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            content: modifiedContent,
+            filename: newFileName,
+          }),
+        });
+        const data = await response.json();
+        if (data.error) {
+          throw new Error(data.error);
+        }
+        alert(data.message);
+      } catch (error) {
+        alert(`Save failed: ${error.message}`);
+      }
+    }
+  };
+
+  const handleClearFilters = () => {
+    setSearchQuery('');
+    setSemanticFilter(null);
+  };
+
+  const goToPrevious = () => {
+    setCurrentIndex((prevIndex) => (prevIndex > 0 ? prevIndex - 1 : 0));
+  };
+
+  const goToNext = () => {
+    setCurrentIndex((prevIndex) =>
+      prevIndex < filteredTrajectory.length - 1 ? prevIndex + 1 : prevIndex
+    );
+  };
+
+  const handleSemanticFilter = (filteredSteps) => {
+    setSemanticFilter(filteredSteps);
+  };
+
+  const highlightMatches = (text, isStepZero = false) => {
+    const stringText = getStepText(text, isStepZero);
+
+    const searchTerms = searchQuery.trim().toLowerCase().split(/\s+/).filter(Boolean);
+    if (searchTerms.length === 0) {
+      return stringText;
+    }
+    const regex = new RegExp(`(${searchTerms.join('|')})`, 'gi');
+    return stringText.split(regex).map((part, index) => {
+        if (searchTerms.some(term => part.toLowerCase() === term)) {
+            return <mark key={index}>{part}</mark>;
+        }
+        return part;
+    });
+  };
+
+  const currentStep = filteredTrajectory[currentIndex];
+
+  return (
+    <div className="App">
+      <div className="main-layout">
+        <div className="trajectory-viewer-container">
+          <header className="App-header">
+            <h1>Trajectory Viewer</h1>
+            <div className="controls-container">
+              <div className="file-upload-container">
+                <input type="file" id="file-upload" onChange={handleFileUpload} accept=".json" />
+                <label htmlFor="file-upload" className="file-upload-button">
+                  Upload JSON
+                </label>
+                {fileName && <span className="file-name">{fileName}</span>}
+              </div>
+              <div className="search-container">
+                <input
+                  type="text"
+                  placeholder="Filter by keywords..."
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                />
+                {(searchQuery || semanticFilter) && (
+                    <button onClick={handleClearFilters} className="clear-filter-button">
+                        Clear Filters
+                    </button>
+                )}
+              </div>
+            </div>
+          </header>
+          <div className="replace-container">
+              <input 
+                type="text"
+                placeholder="Search for..."
+                value={replaceSearch}
+                onChange={(e) => setReplaceSearch(e.target.value)}
+              />
+              <input 
+                type="text"
+                placeholder="Replace with..."
+                value={replaceWith}
+                onChange={(e) => setReplaceWith(e.target.value)}
+              />
+              <button onClick={handleReplace} disabled={!fileContent}>Replace All</button>
+              {modifiedContent && (
+                <button onClick={handleSave} className="save-button">Save Modified</button>
+              )}
+          </div>
+          <main className="App-main">
+            {filteredTrajectory.length > 0 && currentStep ? (
+              <div className="trajectory-step">
+                <div className="step-info">
+                  Step {currentStep.originalIndex} of {trajectory.length - 1}
+                  {(searchQuery.trim() || semanticFilter) &&
+                    <span className="filtered-count">
+                      {' '}(match {currentIndex + 1} of {filteredTrajectory.length})
+                    </span>
+                  }
+                </div>
+                <div className="navigation-buttons">
+                  <button onClick={goToPrevious} disabled={currentIndex === 0}>
+                    Previous
+                  </button>
+                  <button onClick={goToNext} disabled={currentIndex === filteredTrajectory.length - 1}>
+                    Next
+                  </button>
+                </div>
+                {currentStep.isStepZero ? (
+                  <div className="step-content">
+                    <div className="step-item step-zero">
+                      <h2>User Instructions (Step 0)</h2>
+                      <p>{highlightMatches(currentStep.content, true)}</p>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="step-content">
+                    {currentStep.reasoning && (
+                      <div className="step-item reasoning">
+                        <h2>Reasoning</h2>
+                        <p>{currentStep.reasoning}</p>
+                      </div>
+                    )}
+                    <div className="step-item">
+                      <h2>Thought</h2>
+                      <p>{highlightMatches(currentStep.thought)}</p>
+                    </div>
+                    <div className="step-item">
+                      <h2>Action</h2>
+                      <p>{highlightMatches(currentStep.action)}</p>
+                    </div>
+                    <div className="step-item">
+                      <h2>Observation</h2>
+                      <p>{highlightMatches(currentStep.observation)}</p>
+                    </div>
+                  </div>
+                )}
+              </div>
+            ) : (
+              <div className="no-data-message">
+                <p>
+                  {trajectory.length > 0
+                    ? "No steps match your search criteria."
+                    : "Please upload a trajectory JSON file to begin."}
+                </p>
+              </div>
+            )}
+          </main>
+        </div>
+        <div className="chat-pane">
+          <Chat key={chatKey} trajectory={trajectory} onFilter={handleSemanticFilter} />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+export default App;
