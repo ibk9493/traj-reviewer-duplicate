@@ -1,6 +1,10 @@
 import React, { useState, useEffect } from 'react';
 import './App.css';
 import Chat from './Chat';
+import ClusterControls from './components/ClusterControls';
+import ClusteredStep from './components/ClusteredStep';
+import { downloadJSON } from './utils/download';
+import { highlightMatches } from './utils/highlight';
 
 function App() {
   const [trajectory, setTrajectory] = useState([]);
@@ -17,6 +21,8 @@ function App() {
   const [editingStep, setEditingStep] = useState(null);
   const [editedThought, setEditedThought] = useState('');
   const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
+  const [selectedSteps, setSelectedSteps] = useState([]);
+  const [clusters, setClusters] = useState([]);
 
   const getStepText = (value, isStepZero = false) => {
     if (!value) return '';
@@ -261,23 +267,39 @@ function App() {
     setSemanticFilter(filteredSteps);
   };
 
-  const highlightMatches = (text, isStepZero = false) => {
-    const stringText = getStepText(text, isStepZero);
-
-    const searchTerms = searchQuery.trim().toLowerCase().split(/\s+/).filter(Boolean);
-    if (searchTerms.length === 0) {
-      return stringText;
-    }
-    const regex = new RegExp(`(${searchTerms.join('|')})`, 'gi');
-    return stringText.split(regex).map((part, index) => {
-        if (searchTerms.some(term => part.toLowerCase() === term)) {
-            return <mark key={index}>{part}</mark>;
-        }
-        return part;
-    });
-  };
+  // highlightMatches moved to utils/highlight.js
 
   const currentStep = filteredTrajectory[currentIndex];
+
+  const handleCluster = () => {
+    const orderedSteps = trajectory
+      .filter(step => selectedSteps.includes(step.originalIndex))
+      .flatMap(step => step.clustered ? step.steps : [step])
+      .sort((a, b) => a.originalIndex - b.originalIndex);
+    const summary = orderedSteps.map(s => s.thought).join(' | ');
+    const minIndex = Math.min(...selectedSteps);
+    const cluster = {
+      stepIds: [...selectedSteps].sort((a, b) => a - b),
+      summary,
+      steps: orderedSteps,
+      originalIndex: minIndex,
+      clustered: true,
+      setSummary: (newSummary) => {
+        setClusters(prev =>
+          prev.map(c =>
+            c.stepIds === selectedSteps ? { ...c, summary: newSummary } : c
+          )
+        );
+      }
+    };
+    const newTrajectory = trajectory
+      .filter(step => !selectedSteps.includes(step.originalIndex))
+      .concat(cluster)
+      .sort((a, b) => a.originalIndex - b.originalIndex);
+    setTrajectory(newTrajectory);
+    setClusters(prev => [...prev, cluster]);
+    setSelectedSteps([]);
+  };
 
   return (
     <div className="App">
@@ -292,7 +314,30 @@ function App() {
                   Upload JSON
                 </label>
                 {fileName && <span className="file-name">{fileName}</span>}
-              </div>
+              <button
+                onClick={() => {
+                  const transformed = trajectory.map(step => {
+                    if (!step.clustered) return step;
+                    const ordered = step.steps
+                      .slice()
+                      .sort((a, b) => a.originalIndex - b.originalIndex);
+                    return {
+                      originalIndex: step.originalIndex,
+                      clustered: true,
+                      stepIds: step.stepIds,
+                      thought: step.thought || step.summary,
+                      actions: ordered.map(s => s.action),
+                      observations: ordered.map(s => s.observation),
+                      queries: ordered.map(s => s.query).filter(Boolean)
+                    };
+                  });
+                  downloadJSON(transformed, 'updated_trajectory.json');
+                }}
+                className="save-button"
+              >
+                Download JSON
+              </button>
+            </div>
               <div className="search-container">
                 <input
                   type="text"
@@ -326,33 +371,73 @@ function App() {
                 <button onClick={handleSave} className="save-button">Save Modified</button>
               )}
           </div>
+          <ClusterControls
+            trajectory={trajectory}
+            selectedSteps={selectedSteps}
+            setSelectedSteps={setSelectedSteps}
+            onCluster={handleCluster}
+          />
+          <div className="flex justify-center mb-4">
+            <div className="inline-flex rounded-md shadow-sm" role="group">
+              <button
+                className={`px-4 py-2 text-sm font-medium border border-gray-300 rounded-l-md ${
+                  !semanticFilter ? 'bg-blue-600 text-white' : 'bg-white text-gray-700'
+                }`}
+                onClick={() => setSemanticFilter(null)}
+              >
+                Full Trajectory
+              </button>
+              <button
+                className={`px-4 py-2 text-sm font-medium border border-gray-300 rounded-r-md ${
+                  semanticFilter ? 'bg-blue-600 text-white' : 'bg-white text-gray-700'
+                }`}
+                onClick={() => setSemanticFilter(
+                  trajectory.filter(step => step.clustered).map(step => ({
+                    originalIndex: step.originalIndex,
+                    reasoning: 'Clustered step'
+                  }))
+                )}
+              >
+                Cluster Overview
+              </button>
+            </div>
+          </div>
           <main className="App-main">
-            {filteredTrajectory.length > 0 && currentStep ? (
-              <div className="trajectory-step">
-                <div className="step-info">
-                  Step {currentStep.originalIndex} of {trajectory.length - 1}
-                  {(searchQuery.trim() || semanticFilter) &&
-                    <span className="filtered-count">
-                      {' '}(match {currentIndex + 1} of {filteredTrajectory.length})
-                    </span>
-                  }
-                </div>
-                <div className="navigation-buttons">
-                  <button onClick={goToPrevious} disabled={currentIndex === 0}>
-                    Previous
-                  </button>
-                  <button onClick={goToNext} disabled={currentIndex === filteredTrajectory.length - 1}>
-                    Next
-                  </button>
-                </div>
+{filteredTrajectory.length > 0 && currentStep ? (
+<div className="trajectory-step bg-white shadow-md rounded-lg p-6 space-y-6">
+  <div className="step-info">
+    Step {currentStep.originalIndex} of {trajectory.length - 1}
+    {(searchQuery.trim() || semanticFilter) &&
+      <span className="filtered-count">
+        {' '}(match {currentIndex + 1} of {filteredTrajectory.length})
+      </span>
+    }
+  </div>
+  <div className="navigation-buttons">
+    <button onClick={goToPrevious} disabled={currentIndex === 0}>
+      Previous
+    </button>
+    <button onClick={goToNext} disabled={currentIndex === filteredTrajectory.length - 1}>
+      Next
+    </button>
+  </div>
+
+  {currentStep.clustered && (
+    <ClusteredStep
+      cluster={currentStep}
+      getStepText={getStepText}
+      searchQuery={searchQuery}
+    />
+  )}
+                
                 {currentStep.isStepZero ? (
                   <div className="step-content">
                     <div className="step-item step-zero">
                       <h2>User Instructions (Step 0)</h2>
-                      <p>{highlightMatches(currentStep.content, true)}</p>
+                      <p>{highlightMatches(currentStep.content, true, getStepText, searchQuery)}</p>
                     </div>
                   </div>
-                ) : (
+                ) : !currentStep.clustered && (
                   <div className="step-content">
                     {currentStep.reasoning && (
                       <div className="step-item reasoning">
@@ -360,7 +445,7 @@ function App() {
                         <p>{currentStep.reasoning}</p>
                       </div>
                     )}
-                    <div className="step-item">
+                    <div className="step-item border border-gray-200 rounded-md p-4 bg-gray-50">
                       <div className="step-header">
                         <h2>Thought</h2>
                         {editingStep === currentStep.originalIndex ? (
@@ -380,16 +465,16 @@ function App() {
                           rows={6}
                         />
                       ) : (
-                        <p>{highlightMatches(currentStep.thought)}</p>
+                        <p>{highlightMatches(currentStep.thought, false, getStepText, searchQuery)}</p>
                       )}
                     </div>
                     <div className="step-item">
                       <h2>Action</h2>
-                      <p>{highlightMatches(currentStep.action)}</p>
+                      <p>{highlightMatches(currentStep.action, false, getStepText, searchQuery)}</p>
                     </div>
                     <div className="step-item">
                       <h2>Observation</h2>
-                      <p>{highlightMatches(currentStep.observation)}</p>
+                      <p>{highlightMatches(currentStep.observation, false, getStepText, searchQuery)}</p>
                     </div>
                   </div>
                 )}
