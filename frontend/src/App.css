@@ -237,6 +237,81 @@ input[type="file"] {
   border-bottom-color: #d35400;
 }
 
+.step-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 10px;
+}
+
+.step-header h2 {
+  margin-bottom: 0;
+}
+
+.edit-btn {
+  background-color: #3498db;
+  color: white;
+  border: none;
+  padding: 6px 12px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 0.9rem;
+}
+
+.edit-btn:hover {
+  background-color: #2980b9;
+}
+
+.edit-buttons {
+  display: flex;
+  gap: 8px;
+}
+
+.save-edit-btn {
+  background-color: #27ae60;
+  color: white;
+  border: none;
+  padding: 6px 12px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 0.9rem;
+}
+
+.save-edit-btn:hover {
+  background-color: #229954;
+}
+
+.cancel-edit-btn {
+  background-color: #e74c3c;
+  color: white;
+  border: none;
+  padding: 6px 12px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 0.9rem;
+}
+
+.cancel-edit-btn:hover {
+  background-color: #c0392b;
+}
+
+.thought-editor {
+  width: 100%;
+  min-height: 120px;
+  padding: 10px;
+  border: 2px solid #3498db;
+  border-radius: 4px;
+  font-family: inherit;
+  font-size: 1rem;
+  line-height: 1.6;
+  resize: vertical;
+}
+
+.thought-editor:focus {
+  outline: none;
+  border-color: #2980b9;
+}
+
 .navigation-buttons {
   margin-top: 30px;
   margin-bottom: 30px;

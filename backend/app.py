@@ -16,15 +16,10 @@ CORS(app)
 client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 SYSTEM_PROMPT = """
-# 🔎 Identity and Goals
+# 🔎 Identity,  Goals, and Setting
 
-You are part of an LLM-based system designed to **audit SWE-bench agentic trajectories with a human-in-the-loop**. In these trajectories, an agent attempts to resolve a GitHub issue by interacting with the repository inside a containerized environment.
-
-Some trajectories include **source and test patch information** embedded in the agent’s system prompt. In this case, the prompt will have been **subsequently erased** to avoid detection. Your main objective is to **collaborate with the human auditor to determine whether the agent had access to this patch information**.
-
-You are **proactive**, **diligent**, and **detail-oriented**.
-- If you discover **evidence of source or test leakage**, inform the human immediately.
-- Otherwise, you should follow the human’s lead, responding to their queries with precision and care.
+You are part of an LLM-based system designed to **audit, fix, and improve SWE-bench agentic trajectories with a human-in-the-loop**.
+In these trajectories, an agent attempts to resolve a GitHub issue by interacting with the repository inside a containerized environment.
 
 ---
 
@@ -39,17 +34,20 @@ Each trajectory step is a dictionary with the format:
 [{{"step": <int>, "thought": <str>, "action": <str>, "observation": <str>}}]
 ```
 
+Note that the thought comes after the action and the observation is the result of the action.
+
 The human may interact with you in two ways:
 
 1. **General Questions**
-   The human may ask about the trajectory. Respond clearly and accurately.
+   The human may ask general questions about the trajectory. Respond clearly and accurately.
 
 2. **Filtering Requests**
    The human may ask you to filter for certain types of steps (e.g., all steps involving file reads, test invocations, etc.).
    In these cases, call the appropriate filter function.
 
-3. **Language**
-   PR description is used as a synonym for issue description. Do not flag it as a leak.
+Use your best judgement to decide between answering general questions and filtering requests.
+For example, if the human asks "what are the steps that..." this is a filtering request.
+If the human says "help me understand the issue", this is a general question.
 
 ---
 
@@ -164,6 +162,8 @@ def save():
     content = data.get('content')
     filename = data.get('filename')
 
+    logging.info(f"Save request - filename: {filename}, content length: {len(content) if content else 0}")
+
     if not all([content, filename]):
         return jsonify({"error": "Missing required fields"}), 400
 
@@ -179,6 +179,8 @@ def save():
         filepath = os.path.join('data', filename)
         with open(filepath, 'w') as f:
             f.write(content)
+        
+        logging.info(f"File saved successfully to {filepath}")
         return jsonify({"message": f"File saved successfully to {filepath}"})
     except Exception as e:
         logging.error(f"An error occurred during save: {e}")

@@ -14,6 +14,9 @@ function App() {
   const [modifiedContent, setModifiedContent] = useState('');
   const [replaceSearch, setReplaceSearch] = useState('');
   const [replaceWith, setReplaceWith] = useState('');
+  const [editingStep, setEditingStep] = useState(null);
+  const [editedThought, setEditedThought] = useState('');
+  const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
 
   const getStepText = (value, isStepZero = false) => {
     if (!value) return '';
@@ -86,6 +89,7 @@ function App() {
       // Reset all filters and the chat component
       handleClearFilters();
       setChatKey(key => key + 1);
+      setHasUnsavedChanges(false);
     } catch (error) {
       alert('Error parsing JSON file.');
       console.error("File parsing error:", error);
@@ -129,12 +133,68 @@ function App() {
       setModifiedContent(data.modified_content);
       loadTrajectory(data.modified_content);
       alert('Replacement successful!');
+      setHasUnsavedChanges(true);
     } catch (error) {
       alert(`Replacement failed: ${error.message}`);
     }
   };
 
   const handleSave = async () => {
+    let contentToSave;
+    
+    if (modifiedContent) {
+      // Use the modified content from search & replace
+      contentToSave = modifiedContent;
+    } else {
+      // Reconstruct JSON with thought edits - need to update all references
+      const originalData = JSON.parse(fileContent);
+      let updatedData = JSON.parse(JSON.stringify(originalData)); // Deep copy
+      
+      // Build a map of original thoughts to edited thoughts
+      const thoughtChanges = new Map();
+      trajectory.filter(step => !step.isStepZero).forEach(step => {
+        const originalStep = originalData.trajectory[step.originalIndex - 1];
+        const originalThought = getStepText(originalStep.thought);
+        const editedThought = getStepText(step.thought);
+        
+        if (originalThought !== editedThought) {
+          thoughtChanges.set(originalThought, editedThought);
+        }
+      });
+      
+      // Function to recursively update any string that contains old thoughts
+      const updateThoughtReferences = (obj) => {
+        if (typeof obj === 'string') {
+          let updatedString = obj;
+          for (const [originalThought, editedThought] of thoughtChanges) {
+            updatedString = updatedString.replace(new RegExp(escapeRegExp(originalThought), 'g'), editedThought);
+          }
+          return updatedString;
+        } else if (Array.isArray(obj)) {
+          return obj.map(updateThoughtReferences);
+        } else if (obj !== null && typeof obj === 'object') {
+          const updated = {};
+          for (const [key, value] of Object.entries(obj)) {
+            updated[key] = updateThoughtReferences(value);
+          }
+          return updated;
+        }
+        return obj;
+      };
+      
+      // Helper function to escape special regex characters
+      const escapeRegExp = (string) => {
+        return string.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      };
+      
+      // Apply the updates to the entire data structure
+      updatedData = updateThoughtReferences(updatedData);
+      
+      contentToSave = JSON.stringify(updatedData, null, 2);
+    }
+
+    console.log("Content to save:", contentToSave); // Debug log
+
     const newFileName = prompt("Enter new file name (e.g., 'new_trajectory.json'):", `modified_${fileName}`);
     if (newFileName) {
       try {
@@ -142,7 +202,7 @@ function App() {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            content: modifiedContent,
+            content: contentToSave,
             filename: newFileName,
           }),
         });
@@ -150,11 +210,36 @@ function App() {
         if (data.error) {
           throw new Error(data.error);
         }
+        console.log("Save response:", data); // Debug log
         alert(data.message);
+        setHasUnsavedChanges(false);
       } catch (error) {
+        console.error("Save error:", error); // Debug log
         alert(`Save failed: ${error.message}`);
       }
     }
+  };
+
+  const handleEditThought = (stepIndex) => {
+    const step = filteredTrajectory[stepIndex];
+    setEditingStep(step.originalIndex);
+    setEditedThought(getStepText(step.thought));
+  };
+
+  const handleSaveThought = () => {
+    setTrajectory(prev => prev.map(step => 
+      step.originalIndex === editingStep 
+        ? { ...step, thought: editedThought }
+        : step
+    ));
+    setEditingStep(null);
+    setEditedThought('');
+    setHasUnsavedChanges(true);
+  };
+
+  const handleCancelEdit = () => {
+    setEditingStep(null);
+    setEditedThought('');
   };
 
   const handleClearFilters = () => {
@@ -237,7 +322,7 @@ function App() {
                 onChange={(e) => setReplaceWith(e.target.value)}
               />
               <button onClick={handleReplace} disabled={!fileContent}>Replace All</button>
-              {modifiedContent && (
+              {(modifiedContent || hasUnsavedChanges) && (
                 <button onClick={handleSave} className="save-button">Save Modified</button>
               )}
           </div>
@@ -276,8 +361,27 @@ function App() {
                       </div>
                     )}
                     <div className="step-item">
-                      <h2>Thought</h2>
-                      <p>{highlightMatches(currentStep.thought)}</p>
+                      <div className="step-header">
+                        <h2>Thought</h2>
+                        {editingStep === currentStep.originalIndex ? (
+                          <div className="edit-buttons">
+                            <button onClick={handleSaveThought} className="save-edit-btn">Save</button>
+                            <button onClick={handleCancelEdit} className="cancel-edit-btn">Cancel</button>
+                          </div>
+                        ) : (
+                          <button onClick={() => handleEditThought(currentIndex)} className="edit-btn">Edit</button>
+                        )}
+                      </div>
+                      {editingStep === currentStep.originalIndex ? (
+                        <textarea
+                          value={editedThought}
+                          onChange={(e) => setEditedThought(e.target.value)}
+                          className="thought-editor"
+                          rows={6}
+                        />
+                      ) : (
+                        <p>{highlightMatches(currentStep.thought)}</p>
+                      )}
                     </div>
                     <div className="step-item">
                       <h2>Action</h2>
