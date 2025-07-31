@@ -68,25 +68,46 @@ function App() {
     setCurrentIndex(0);
   }, [searchQuery, trajectory, semanticFilter]);
 
-  const loadTrajectory = (contentString) => {
+  const loadTrajectory = (contentString, filename = '') => {
     try {
       const data = JSON.parse(contentString);
       let processedTrajectory = [];
 
+      // Parse filename for repo information
+      const parseRepo = (filename) => {
+        // Pattern: <repo owner>__<repo name>-<issue id (int)>.<some extension>
+        const match = filename.match(/^(.+?)__(.+?)-(\d+)\./);
+        if (match) {
+          const [, owner, name] = match;
+          return `${owner}/${name}`;
+        }
+        return null;
+      };
+
       // Handle Step 0 from history
       if (data.history && data.history.length > 1) {
-        processedTrajectory.push({
-          ...data.history[1],
-          originalIndex: 0,
+        const stepZero = {
+          content: data.history[1].content,
           isStepZero: true,
-        });
+        };
+        
+        // Add repo information if filename matches pattern
+        const repo = parseRepo(filename);
+        if (repo) {
+          stepZero.repo = repo;
+        }
+        
+        processedTrajectory.push(stepZero);
       }
 
       // Handle the rest of the trajectory
       if (data.trajectory && Array.isArray(data.trajectory)) {
         const trajectoryWithOriginalIndex = data.trajectory.map((step, index) => ({
-          ...step,
-          originalIndex: index + 1
+          action: step.action,
+          observation: step.observation,
+          thought: step.thought,
+          originalIndex: index + 1,
+          clustered: false
         }));
         processedTrajectory = [...processedTrajectory, ...trajectoryWithOriginalIndex];
       }
@@ -111,7 +132,7 @@ function App() {
         const content = e.target.result;
         setFileContent(content);
         setModifiedContent(''); // Clear any previous modifications
-        loadTrajectory(content);
+        loadTrajectory(content, file.name);
       };
       reader.readAsText(file);
     }
@@ -137,7 +158,7 @@ function App() {
         throw new Error(data.error);
       }
       setModifiedContent(data.modified_content);
-      loadTrajectory(data.modified_content);
+      loadTrajectory(data.modified_content, fileName);
       alert('Replacement successful!');
       setHasUnsavedChanges(true);
     } catch (error) {
@@ -317,7 +338,18 @@ function App() {
               <button
                 onClick={() => {
                   const transformed = trajectory.map(step => {
-                    if (!step.clustered) return step;
+                    if (step.isStepZero) {
+                      return step; // Preserve Step 0 structure
+                    }
+                    if (!step.clustered) {
+                      return {
+                        action: step.action,
+                        observation: step.observation,
+                        thought: step.thought,
+                        originalIndex: step.originalIndex,
+                        clustered: false
+                      };
+                    }
                     const ordered = step.steps
                       .slice()
                       .sort((a, b) => a.originalIndex - b.originalIndex);
@@ -327,8 +359,7 @@ function App() {
                       stepIds: step.stepIds,
                       thought: step.thought || step.summary,
                       actions: ordered.map(s => s.action),
-                      observations: ordered.map(s => s.observation),
-                      queries: ordered.map(s => s.query).filter(Boolean)
+                      observations: ordered.map(s => s.observation)
                     };
                   });
                   downloadJSON(transformed, 'updated_trajectory.json');

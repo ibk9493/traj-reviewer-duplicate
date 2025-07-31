@@ -312,6 +312,43 @@ input[type="file"] {
   border-color: #2980b9;
 }
 
+.expand-btn {
+  background-color: #f8f9fa;
+  border: 1px solid #dee2e6;
+  color: #495057;
+  padding: 4px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 0.875rem;
+  transition: all 0.2s ease;
+}
+
+.expand-btn:hover {
+  background-color: #e9ecef;
+  border-color: #adb5bd;
+}
+
+.action-observation-pair {
+  margin-bottom: 1rem;
+}
+
+.action-observation-pair .step-item {
+  transition: all 0.3s ease;
+}
+
+.action-observation-pair .step-item.bg-blue-50 {
+  border-left: 4px solid #3498db;
+}
+
+.action-observation-pair .step-item.bg-green-50 {
+  border-left: 4px solid #27ae60;
+}
+
+.cluster-details h3 {
+  border-bottom: 2px solid #e9ecef;
+  padding-bottom: 0.5rem;
+}
+
 .navigation-buttons {
   margin-top: 30px;
   margin-bottom: 30px;
