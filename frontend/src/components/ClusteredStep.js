@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { highlightMatches } from '../utils/highlight';
 
-const ClusteredStep = ({ cluster, getStepText, searchQuery }) => {
+const ClusteredStep = ({ cluster, getStepText, searchQuery, onUncluster, onEditSummary }) => {
   const [expanded, setExpanded] = useState(false);
   const [editing, setEditing] = useState(false);
   const [editedSummary, setEditedSummary] = useState(cluster.summary);
@@ -19,6 +19,11 @@ const ClusteredStep = ({ cluster, getStepText, searchQuery }) => {
     });
   };
 
+  // Keep editedSummary in sync if cluster.summary changes
+  React.useEffect(() => {
+    setEditedSummary(cluster.summary);
+  }, [cluster.summary]);
+
   return (
     <div className="step-item clustered-step">
       <div className="step-header">
@@ -26,6 +31,15 @@ const ClusteredStep = ({ cluster, getStepText, searchQuery }) => {
         <button onClick={() => setExpanded(!expanded)} className="expand-btn">
           {expanded ? 'Collapse' : 'Expand'}
         </button>
+        {onUncluster && (
+          <button
+            onClick={() => onUncluster(cluster)}
+            className="ml-2 px-2 py-1 bg-red-500 text-white rounded text-xs"
+            title="Uncluster"
+          >
+            Uncluster
+          </button>
+        )}
       </div>
       
       <div className="step-item border border-gray-200 rounded-md p-4 bg-gray-50">
@@ -36,7 +50,7 @@ const ClusteredStep = ({ cluster, getStepText, searchQuery }) => {
               <button
                 className="save-edit-btn"
                 onClick={() => {
-                  cluster.setSummary(editedSummary);
+                  if (onEditSummary) onEditSummary(cluster, editedSummary);
                   setEditing(false);
                 }}
               >

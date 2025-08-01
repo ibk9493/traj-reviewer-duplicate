@@ -1,9 +1,9 @@
 import React from 'react';
 
 const ClusterControls = ({ trajectory, selectedSteps, setSelectedSteps, onCluster }) => {
-  // Get available step indices (excluding step 0 and already clustered steps)
+  // Get available step indices (excluding step 0, already clustered, or stale steps)
   const availableSteps = trajectory
-    .filter(step => !step.isStepZero && !step.clustered)
+    .filter(step => !step.isStepZero && !step.clustered && !step.stale)
     .map(step => step.originalIndex)
     .sort((a, b) => a - b);
 
@@ -63,7 +63,8 @@ const ClusterControls = ({ trajectory, selectedSteps, setSelectedSteps, onCluste
           .map((step) => {
             const isSelectable = canSelectStep(step.originalIndex);
             const isClustered = step.clustered;
-            const isDisabled = isClustered || !isSelectable;
+            const isStale = step.stale;
+            const isDisabled = isClustered || isStale || !isSelectable;
             
             return (
               <label 
@@ -80,7 +81,9 @@ const ClusterControls = ({ trajectory, selectedSteps, setSelectedSteps, onCluste
                   disabled={isDisabled}
                 />
                 <span className={isDisabled ? 'text-gray-500' : 'text-gray-800'}>
-                  Step {step.originalIndex} {isClustered ? '(Clustered)' : ''}
+                  Step {step.originalIndex} 
+                  {isClustered ? ' (Clustered)' : ''}
+                  {isStale ? ' (Stale)' : ''}
                 </span>
               </label>
             );

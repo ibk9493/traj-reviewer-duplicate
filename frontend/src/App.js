@@ -5,8 +5,43 @@ import ClusterControls from './components/ClusterControls';
 import ClusteredStep from './components/ClusteredStep';
 import { downloadJSON } from './utils/download';
 import { highlightMatches } from './utils/highlight';
+import { openDB } from 'idb';
+
+// IndexedDB utility for app state
+const DB_NAME = 'traj-reviewer';
+const DB_STORE = 'state';
+const DB_KEY = 'appState';
+
+async function saveAppState(state) {
+  const db = await openDB(DB_NAME, 1, {
+    upgrade(db) {
+      db.createObjectStore(DB_STORE);
+    },
+  });
+  await db.put(DB_STORE, state, DB_KEY);
+}
+
+async function loadAppState() {
+  const db = await openDB(DB_NAME, 1, {
+    upgrade(db) {
+      db.createObjectStore(DB_STORE);
+    },
+  });
+  return await db.get(DB_STORE, DB_KEY);
+}
+
+async function clearAppState() {
+  const db = await openDB(DB_NAME, 1, {
+    upgrade(db) {
+      db.createObjectStore(DB_STORE);
+    },
+  });
+  await db.clear(DB_STORE);
+}
 
 function App() {
+  // Track if we loaded from cache for notification
+  const [loadedFromCache, setLoadedFromCache] = useState(false);
   const [trajectory, setTrajectory] = useState([]);
   const [filteredTrajectory, setFilteredTrajectory] = useState([]);
   const [currentIndex, setCurrentIndex] = useState(0);
@@ -35,6 +70,72 @@ function App() {
     if (typeof value === 'string') return value;
     return '';
   };
+
+  // On mount, try to load from IndexedDB
+  useEffect(() => {
+    (async () => {
+      const cached = await loadAppState();
+      if (cached && cached.trajectory && cached.trajectory.length > 0) {
+        setTrajectory(cached.trajectory);
+        setFilteredTrajectory(cached.filteredTrajectory || []);
+        setCurrentIndex(cached.currentIndex || 0);
+        setFileName(cached.fileName || '');
+        setSearchQuery(cached.searchQuery || '');
+        setSemanticFilter(cached.semanticFilter || null);
+        setChatKey(cached.chatKey || 0);
+        setFileContent(cached.fileContent || '');
+        setModifiedContent(cached.modifiedContent || '');
+        setReplaceSearch(cached.replaceSearch || '');
+        setReplaceWith(cached.replaceWith || '');
+        setEditingStep(cached.editingStep || null);
+        setEditedThought(cached.editedThought || '');
+        setHasUnsavedChanges(cached.hasUnsavedChanges || false);
+        setSelectedSteps(cached.selectedSteps || []);
+        setClusters(cached.clusters || []);
+        setLoadedFromCache(true);
+      }
+    })();
+  }, []);
+
+  // On any relevant state change, save to IndexedDB
+  useEffect(() => {
+    const state = {
+      trajectory,
+      filteredTrajectory,
+      currentIndex,
+      fileName,
+      searchQuery,
+      semanticFilter,
+      chatKey,
+      fileContent,
+      modifiedContent,
+      replaceSearch,
+      replaceWith,
+      editingStep,
+      editedThought,
+      hasUnsavedChanges,
+      selectedSteps,
+      clusters,
+    };
+    saveAppState(state);
+  }, [
+    trajectory,
+    filteredTrajectory,
+    currentIndex,
+    fileName,
+    searchQuery,
+    semanticFilter,
+    chatKey,
+    fileContent,
+    modifiedContent,
+    replaceSearch,
+    replaceWith,
+    editingStep,
+    editedThought,
+    hasUnsavedChanges,
+    selectedSteps,
+    clusters,
+  ]);
 
   useEffect(() => {
     const keywordSearchTerms = searchQuery.trim().toLowerCase().split(/\s+/).filter(Boolean);
@@ -65,7 +166,7 @@ function App() {
     }
 
     setFilteredTrajectory(newFiltered);
-    setCurrentIndex(0);
+    // setCurrentIndex(0); // Removed: only reset index on file load or filter clear
   }, [searchQuery, trajectory, semanticFilter]);
 
   const loadTrajectory = (contentString, filename = '') => {
@@ -115,6 +216,7 @@ function App() {
       setTrajectory(processedTrajectory);
       // Reset all filters and the chat component
       handleClearFilters();
+      setCurrentIndex(0); // Reset to first step on file load
       setChatKey(key => key + 1);
       setHasUnsavedChanges(false);
     } catch (error) {
@@ -144,7 +246,7 @@ function App() {
       return;
     }
     try {
-      const response = await fetch('http://localhost:5001/replace', {
+      const response = await fetch('http://localhost:3002/replace', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -225,7 +327,7 @@ function App() {
     const newFileName = prompt("Enter new file name (e.g., 'new_trajectory.json'):", `modified_${fileName}`);
     if (newFileName) {
       try {
-        const response = await fetch('http://localhost:5001/save', {
+        const response = await fetch('http://localhost:3002/save', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -272,6 +374,7 @@ function App() {
   const handleClearFilters = () => {
     setSearchQuery('');
     setSemanticFilter(null);
+    setCurrentIndex(0); // Reset to first step when clearing filters
   };
 
   const goToPrevious = () => {
@@ -299,19 +402,13 @@ function App() {
       .sort((a, b) => a.originalIndex - b.originalIndex);
     const summary = orderedSteps.map(s => s.thought).join(' | ');
     const minIndex = Math.min(...selectedSteps);
+    const stepIds = [...selectedSteps].sort((a, b) => a - b);
     const cluster = {
-      stepIds: [...selectedSteps].sort((a, b) => a - b),
+      stepIds,
       summary,
       steps: orderedSteps,
       originalIndex: minIndex,
-      clustered: true,
-      setSummary: (newSummary) => {
-        setClusters(prev =>
-          prev.map(c =>
-            c.stepIds === selectedSteps ? { ...c, summary: newSummary } : c
-          )
-        );
-      }
+      clustered: true
     };
     const newTrajectory = trajectory
       .filter(step => !selectedSteps.includes(step.originalIndex))
@@ -328,8 +425,24 @@ function App() {
         <div className="trajectory-viewer-container">
           <header className="App-header">
             <h1>Trajectory Viewer</h1>
+            {loadedFromCache && (
+              <div style={{ color: 'orange', fontWeight: 'bold', marginBottom: 8 }}>
+                Loaded from cache (IndexedDB)
+              </div>
+            )}
             <div className="controls-container">
               <div className="file-upload-container">
+                <button
+                  onClick={async () => {
+                    await clearAppState();
+                    alert('Cache cleared! (Current session is unaffected)');
+                  }}
+                  className="clear-cache-btn"
+                  style={{ marginRight: 8, background: '#f87171', color: 'white', border: 'none', borderRadius: 4, padding: '4px 10px' }}
+                  title="Clear cached data (does not reset current session)"
+                >
+                  Clear Cache
+                </button>
                 <input type="file" id="file-upload" onChange={handleFileUpload} accept=".json" />
                 <label htmlFor="file-upload" className="file-upload-button">
                   Upload JSON
@@ -458,6 +571,45 @@ function App() {
       cluster={currentStep}
       getStepText={getStepText}
       searchQuery={searchQuery}
+      onEditSummary={(cluster, newSummary) => {
+        // Update summary in both clusters and trajectory
+        setClusters(prev =>
+          prev.map(c =>
+            c.stepIds.join(',') === cluster.stepIds.join(',') ? { ...c, summary: newSummary } : c
+          )
+        );
+        setTrajectory(prev =>
+          prev.map(s =>
+            s.clustered && s.stepIds && s.stepIds.join(',') === cluster.stepIds.join(',') ? { ...s, summary: newSummary } : s
+          )
+        );
+      }}
+      onUncluster={(cluster) => {
+        // Remove the cluster from trajectory and clusters
+        setTrajectory(prev => {
+          // Remove the cluster
+          let withoutCluster = prev.filter(
+            step => !(step.clustered && step.stepIds && step.stepIds.join(',') === cluster.stepIds.join(','))
+          );
+          // Restore steps (preserve their properties)
+          const restoredSteps = cluster.steps.map(s => ({
+            ...s,
+            clustered: false
+          }));
+          // Remove any duplicates (in case steps are already present)
+          const allSteps = [
+            ...withoutCluster.filter(s => !restoredSteps.some(r => r.originalIndex === s.originalIndex)),
+            ...restoredSteps
+          ];
+          // Sort by originalIndex
+          return allSteps.sort((a, b) => a.originalIndex - b.originalIndex);
+        });
+        setClusters(prev =>
+          prev.filter(
+            c => !(c.stepIds && c.stepIds.join(',') === cluster.stepIds.join(','))
+          )
+        );
+      }}
     />
   )}
                 
@@ -485,7 +637,32 @@ function App() {
                             <button onClick={handleCancelEdit} className="cancel-edit-btn">Cancel</button>
                           </div>
                         ) : (
-                          <button onClick={() => handleEditThought(currentIndex)} className="edit-btn">Edit</button>
+                          <>
+                            <button onClick={() => handleEditThought(currentIndex)} className="edit-btn">Edit</button>
+                            {currentStep.stale
+                              ? <button
+                                  onClick={() => {
+                                    setTrajectory(prev => prev.map(step =>
+                                      step.originalIndex === currentStep.originalIndex
+                                        ? { ...step, stale: false }
+                                        : step
+                                    ));
+                                  }}
+                                  className="restore-btn"
+                                >Restore</button>
+                              : <button
+                                  onClick={() => {
+                                    setTrajectory(prev => prev.map(step =>
+                                      step.originalIndex === currentStep.originalIndex
+                                        ? { ...step, stale: true }
+                                        : step
+                                    ));
+                                    setHasUnsavedChanges(true);
+                                  }}
+                                  className="stale-btn"
+                                >Mark as Stale</button>
+                            }
+                          </>
                         )}
                       </div>
                       {editingStep === currentStep.originalIndex ? (
