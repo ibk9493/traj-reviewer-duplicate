@@ -60,7 +60,7 @@ const ClusterControls = ({ trajectory, selectedSteps, setSelectedSteps, onCluste
       <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-2 mb-4">
         {trajectory
           .filter(step => !step.isStepZero)
-          .map((step) => {
+          .map((step, idx) => {
             const isSelectable = canSelectStep(step.originalIndex);
             const isClustered = step.clustered;
             const isStale = step.stale;
@@ -68,7 +68,7 @@ const ClusterControls = ({ trajectory, selectedSteps, setSelectedSteps, onCluste
             
             return (
               <label 
-                key={step.originalIndex} 
+                key={step.originalIndex + '-' + (step.clustered ? 'c' : 's') + '-' + (step.stale ? 't' : 'a') + '-' + idx}
                 className={`flex items-center space-x-2 text-sm p-2 rounded-md transition-all duration-200 ${
                   isDisabled ? 'opacity-50 cursor-not-allowed bg-gray-100' : 'cursor-pointer hover:bg-blue-50'
                 }`}

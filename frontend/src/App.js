@@ -194,38 +194,89 @@ function App() {
         return null;
       };
 
-      // Handle Step 0 from history
+      // Handle Step 0 from history (tool output format)
       if (data.history && data.history.length > 1) {
         const stepZero = {
           content: data.history[1].content,
           isStepZero: true,
         };
-        
         // Add repo information if filename matches pattern
         const repo = parseRepo(filename);
         if (repo) {
           stepZero.repo = repo;
         }
-        
         processedTrajectory.push(stepZero);
       }
 
-      // Handle the rest of the trajectory
-      if (data.trajectory && Array.isArray(data.trajectory)) {
-        const trajectoryWithOriginalIndex = data.trajectory.map((step, index) => ({
-          action: step.action,
-          observation: step.observation,
-          thought: step.thought,
-          originalIndex: index + 1,
-          clustered: false
-        }));
-        processedTrajectory = [...processedTrajectory, ...trajectoryWithOriginalIndex];
+      // Handle Step 0 from array (app download format)
+      let inputTrajectory = [];
+      if (Array.isArray(data)) {
+        // Uploaded file is an array (app download)
+        if (data.length > 0 && data[0].isStepZero) {
+          processedTrajectory.push(data[0]);
+          inputTrajectory = data.slice(1);
+        } else {
+          inputTrajectory = data;
+        }
+      } else if (data.trajectory && Array.isArray(data.trajectory)) {
+        // Uploaded file is an object with trajectory key (tool output)
+        inputTrajectory = data.trajectory;
+      }
+      if (inputTrajectory.length > 0) {
+        const enhancedTrajectory = inputTrajectory.map((step, index) => {
+          const isCluster =
+            step.clustered === true &&
+            Array.isArray(step.stepIds) &&
+            (Array.isArray(step.steps) || (Array.isArray(step.actions) && Array.isArray(step.observations)));
+          // Debug: log each step and cluster detection
+          console.log('DEBUG: step at upload:', step, 'isCluster:', isCluster);
+          if (isCluster) {
+            // If steps is missing but actions/observations are present, reconstruct steps
+            let stepsArr = Array.isArray(step.steps) ? step.steps : [];
+            if ((!stepsArr || stepsArr.length === 0) && Array.isArray(step.actions) && Array.isArray(step.observations)) {
+              stepsArr = step.stepIds.map((id, i) => ({
+                originalIndex: id,
+                action: step.actions[i],
+                observation: step.observations[i],
+                thought: '', // No thought in flat cluster download, can be improved if needed
+                clustered: false,
+                stale: false
+              }));
+            }
+            return {
+              ...step,
+              clustered: true,
+              stale: !!step.stale,
+              summary: typeof step.summary === 'string' ? step.summary : '',
+              steps: stepsArr,
+              stepIds: Array.isArray(step.stepIds) ? step.stepIds : [],
+              // Ensure originalIndex is present
+              originalIndex: typeof step.originalIndex === 'number' ? step.originalIndex : index + 1
+            };
+          } else {
+            // Normal step (tool output or app)
+            return {
+              action: step.action,
+              observation: step.observation,
+              thought: step.thought,
+              originalIndex: typeof step.originalIndex === 'number' ? step.originalIndex : index + 1,
+              clustered: false,
+              stale: !!step.stale
+            };
+          }
+        });
+        processedTrajectory = [...processedTrajectory, ...enhancedTrajectory];
       }
       
       setTrajectory(processedTrajectory);
+      // Reconstruct clusters array from loaded trajectory
+      setClusters(processedTrajectory.filter(step => step.clustered));
+      // Debug: log loaded trajectory and clusters
+      console.log('DEBUG: loaded trajectory after upload:', processedTrajectory);
+      console.log('DEBUG: loaded clusters after upload:', processedTrajectory.filter(step => step.clustered));
       // Reset all filters and the chat component
       handleClearFilters();
-      setCurrentIndex(0); // Reset to first step on file load
+      setCurrentIndex(0); // Reset to first step when clearing filters
       setChatKey(key => key + 1);
       setHasUnsavedChanges(false);
     } catch (error) {
@@ -467,33 +518,37 @@ function App() {
                 {fileName && <span className="file-name">{fileName}</span>}
               <button
                 onClick={() => {
-                  const transformed = trajectory
-                    .filter(step => !step.stale) // Exclude stale steps from download
-                    .map(step => {
-                      if (step.isStepZero) {
-                        return step; // Preserve Step 0 structure
-                      }
-                      if (!step.clustered) {
+                  const transformed = [
+                    // Always include Step 0 if present
+                    ...trajectory.filter(step => step.isStepZero),
+                    // Then include all other non-stale steps
+                    ...trajectory
+                      .filter(step => !step.isStepZero && !step.stale)
+                      .map(step => {
+                        if (!step.clustered) {
+                          return {
+                            action: step.action,
+                            observation: step.observation,
+                            thought: step.thought,
+                            originalIndex: step.originalIndex,
+                            clustered: false,
+                            stale: !!step.stale
+                          };
+                        }
+                        const ordered = step.steps
+                          .slice()
+                          .sort((a, b) => a.originalIndex - b.originalIndex);
                         return {
-                          action: step.action,
-                          observation: step.observation,
-                          thought: step.thought,
                           originalIndex: step.originalIndex,
-                          clustered: false
+                          clustered: true,
+                          stepIds: step.stepIds,
+                          thought: step.thought || step.summary,
+                          actions: ordered.map(s => s.action),
+                          observations: ordered.map(s => s.observation),
+                          stale: !!step.stale
                         };
-                      }
-                      const ordered = step.steps
-                        .slice()
-                        .sort((a, b) => a.originalIndex - b.originalIndex);
-                      return {
-                        originalIndex: step.originalIndex,
-                        clustered: true,
-                        stepIds: step.stepIds,
-                        thought: step.thought || step.summary,
-                        actions: ordered.map(s => s.action),
-                        observations: ordered.map(s => s.observation)
-                      };
-                    });
+                      })
+                  ];
                   downloadJSON(transformed, 'updated_trajectory.json');
                 }}
                 className="download-json-btn"

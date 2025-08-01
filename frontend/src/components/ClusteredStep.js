@@ -93,7 +93,7 @@ const ClusteredStep = ({ cluster, getStepText, searchQuery, onUncluster, onEditS
           />
         ) : (
           <p className="text-sm text-gray-800 whitespace-pre-wrap">
-            {editedSummary}
+            {editedSummary || cluster.summary || cluster.thought || ''}
           </p>
         )}
       </div>
@@ -101,7 +101,19 @@ const ClusteredStep = ({ cluster, getStepText, searchQuery, onUncluster, onEditS
       {expanded && (
         <div className="step-content cluster-details space-y-4">
           <h3 className="text-lg font-semibold text-gray-700 mb-3">Action-Observation Pairs</h3>
-          {cluster.steps.map((step, idx) => (
+          {(Array.isArray(cluster.steps) && cluster.steps.length > 0
+            ? cluster.steps
+            : (Array.isArray(cluster.actions) && Array.isArray(cluster.observations)
+                ? cluster.stepIds.map((id, i) => ({
+                    originalIndex: id,
+                    action: cluster.actions[i],
+                    observation: cluster.observations[i],
+                    thought: '',
+                    clustered: false,
+                    stale: false
+                  }))
+                : [])
+          ).map((step, idx) => (
             <div key={`action-obs-${idx}`} className="action-observation-pair">
               {/* Action Section */}
               <div className="step-item border border-gray-200 rounded-md p-4 bg-blue-50 mb-2">
