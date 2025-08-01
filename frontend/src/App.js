@@ -246,7 +246,7 @@ function App() {
       return;
     }
     try {
-      const response = await fetch('http://localhost:3002/replace', {
+      const response = await fetch('http://localhost:5001/replace', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -327,7 +327,7 @@ function App() {
     const newFileName = prompt("Enter new file name (e.g., 'new_trajectory.json'):", `modified_${fileName}`);
     if (newFileName) {
       try {
-        const response = await fetch('http://localhost:3002/save', {
+        const response = await fetch('http://localhost:5001/save', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -450,31 +450,33 @@ function App() {
                 {fileName && <span className="file-name">{fileName}</span>}
               <button
                 onClick={() => {
-                  const transformed = trajectory.map(step => {
-                    if (step.isStepZero) {
-                      return step; // Preserve Step 0 structure
-                    }
-                    if (!step.clustered) {
+                  const transformed = trajectory
+                    .filter(step => !step.stale) // Exclude stale steps from download
+                    .map(step => {
+                      if (step.isStepZero) {
+                        return step; // Preserve Step 0 structure
+                      }
+                      if (!step.clustered) {
+                        return {
+                          action: step.action,
+                          observation: step.observation,
+                          thought: step.thought,
+                          originalIndex: step.originalIndex,
+                          clustered: false
+                        };
+                      }
+                      const ordered = step.steps
+                        .slice()
+                        .sort((a, b) => a.originalIndex - b.originalIndex);
                       return {
-                        action: step.action,
-                        observation: step.observation,
-                        thought: step.thought,
                         originalIndex: step.originalIndex,
-                        clustered: false
+                        clustered: true,
+                        stepIds: step.stepIds,
+                        thought: step.thought || step.summary,
+                        actions: ordered.map(s => s.action),
+                        observations: ordered.map(s => s.observation)
                       };
-                    }
-                    const ordered = step.steps
-                      .slice()
-                      .sort((a, b) => a.originalIndex - b.originalIndex);
-                    return {
-                      originalIndex: step.originalIndex,
-                      clustered: true,
-                      stepIds: step.stepIds,
-                      thought: step.thought || step.summary,
-                      actions: ordered.map(s => s.action),
-                      observations: ordered.map(s => s.observation)
-                    };
-                  });
+                    });
                   downloadJSON(transformed, 'updated_trajectory.json');
                 }}
                 className="save-button"
