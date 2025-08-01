@@ -81,9 +81,39 @@ const ClusterControls = ({ trajectory, selectedSteps, setSelectedSteps, onCluste
                   disabled={isDisabled}
                 />
                 <span className={isDisabled ? 'text-gray-500' : 'text-gray-800'}>
-                  Step {step.originalIndex} 
-                  {isClustered ? ' (Clustered)' : ''}
-                  {isStale ? ' (Stale)' : ''}
+                  Step {step.originalIndex}
+                  {isClustered && (
+                    <span
+                      style={{
+                        background: '#e5e7eb',
+                        color: '#6b7280',
+                        borderRadius: 6,
+                        padding: '2px 8px',
+                        marginLeft: 6,
+                        fontSize: 12,
+                        fontWeight: 600,
+                        letterSpacing: 0.5
+                      }}
+                    >
+                      Clustered
+                    </span>
+                  )}
+                  {isStale && (
+                    <span
+                      style={{
+                        background: '#f59e42',
+                        color: 'white',
+                        borderRadius: 6,
+                        padding: '2px 8px',
+                        marginLeft: 6,
+                        fontSize: 12,
+                        fontWeight: 600,
+                        letterSpacing: 0.5
+                      }}
+                    >
+                      Stale
+                    </span>
+                  )}
                 </span>
               </label>
             );

@@ -154,15 +154,24 @@ function App() {
     }
 
     if (semanticFilter) {
-      const semanticIndices = new Set(semanticFilter.map(sf => sf.originalIndex));
-      newFiltered = newFiltered.filter(step => semanticIndices.has(step.originalIndex));
-      
-      // Attach reasoning to the filtered steps
-      const reasoningMap = new Map(semanticFilter.map(sf => [sf.originalIndex, sf.reasoning]));
-      newFiltered = newFiltered.map(step => ({
-        ...step,
-        reasoning: reasoningMap.get(step.originalIndex)
-      }));
+      // Debug: log trajectory and semanticFilter
+      console.log('DEBUG: trajectory:', trajectory);
+      console.log('DEBUG: semanticFilter:', semanticFilter);
+      // If semanticFilter contains full cluster objects, use them directly
+      if (semanticFilter.length > 0 && semanticFilter[0].clustered) {
+        newFiltered = semanticFilter;
+      } else {
+        const semanticIndices = new Set(semanticFilter.map(sf => sf.originalIndex));
+        newFiltered = newFiltered.filter(step => semanticIndices.has(step.originalIndex));
+        // Attach reasoning to the filtered steps
+        const reasoningMap = new Map(semanticFilter.map(sf => [sf.originalIndex, sf.reasoning]));
+        newFiltered = newFiltered.map(step => ({
+          ...step,
+          reasoning: reasoningMap.get(step.originalIndex)
+        }));
+      }
+      // Debug: log newFiltered
+      console.log('DEBUG: newFiltered:', newFiltered);
     }
 
     setFilteredTrajectory(newFiltered);
@@ -417,6 +426,14 @@ function App() {
     setTrajectory(newTrajectory);
     setClusters(prev => [...prev, cluster]);
     setSelectedSteps([]);
+    // After clustering, go to the new cluster in the filteredTrajectory
+    setTimeout(() => {
+      setFilteredTrajectory(ft => {
+        const idx = ft.findIndex(s => s.clustered && s.originalIndex === minIndex);
+        if (idx !== -1) setCurrentIndex(idx);
+        return ft;
+      });
+    }, 0);
   };
 
   return (
@@ -479,7 +496,19 @@ function App() {
                     });
                   downloadJSON(transformed, 'updated_trajectory.json');
                 }}
-                className="save-button"
+                className="download-json-btn"
+                style={{
+                  background: '#2563eb',
+                  color: 'white',
+                  border: 'none',
+                  borderRadius: 8,
+                  padding: '10px 28px',
+                  fontWeight: 700,
+                  fontSize: 18,
+                  marginLeft: 12,
+                  cursor: 'pointer',
+                  boxShadow: '0 2px 8px rgba(37,99,235,0.08)'
+                }}
               >
                 Download JSON
               </button>
@@ -537,12 +566,18 @@ function App() {
                 className={`px-4 py-2 text-sm font-medium border border-gray-300 rounded-r-md ${
                   semanticFilter ? 'bg-blue-600 text-white' : 'bg-white text-gray-700'
                 }`}
-                onClick={() => setSemanticFilter(
-                  trajectory.filter(step => step.clustered).map(step => ({
-                    originalIndex: step.originalIndex,
-                    reasoning: 'Clustered step'
-                  }))
-                )}
+                onClick={() => {
+                  // Restore original logic: filter by index, attach reasoning
+                  setSemanticFilter(
+                    trajectory
+                      .filter(step => step.clustered)
+                      .map(step => ({
+                        originalIndex: step.originalIndex,
+                        reasoning: 'Clustered step'
+                      }))
+                  );
+                  setCurrentIndex(0); // Always show the first cluster in overview
+                }}
               >
                 Cluster Overview
               </button>
@@ -559,13 +594,92 @@ function App() {
       </span>
     }
   </div>
-  <div className="navigation-buttons">
-    <button onClick={goToPrevious} disabled={currentIndex === 0}>
-      Previous
-    </button>
-    <button onClick={goToNext} disabled={currentIndex === filteredTrajectory.length - 1}>
-      Next
-    </button>
+  <div
+    className="step-navigation-controls"
+    style={{
+      display: 'flex',
+      alignItems: 'center',
+      gap: 24,
+      marginBottom: 16,
+      flexWrap: 'wrap'
+    }}
+  >
+    <form
+      onSubmit={e => {
+        e.preventDefault();
+        const stepNum = parseInt(e.target.elements.goToStep.value, 10);
+        if (
+          !isNaN(stepNum) &&
+          stepNum >= 1 &&
+          stepNum <= filteredTrajectory.length
+        ) {
+          setCurrentIndex(stepNum - 1);
+        }
+      }}
+      style={{ display: 'flex', alignItems: 'center', gap: 8 }}
+    >
+      <label htmlFor="goToStep" style={{ fontWeight: 500, marginRight: 4 }}>Go to Step:</label>
+      <input
+        id="goToStep"
+        name="goToStep"
+        type="number"
+        min={1}
+        max={filteredTrajectory.length}
+        defaultValue={currentIndex + 1}
+        style={{ width: 60, padding: 4, borderRadius: 4, border: '1px solid #ccc', fontSize: 16 }}
+      />
+      <button
+        type="submit"
+        style={{
+          background: '#22c55e',
+          color: 'white',
+          border: 'none',
+          borderRadius: 4,
+          padding: '6px 18px',
+          fontWeight: 700,
+          fontSize: 16,
+          cursor: 'pointer'
+        }}
+      >
+        Go
+      </button>
+    </form>
+    <div className="navigation-buttons" style={{ display: 'flex', gap: 16 }}>
+      <button
+        onClick={goToPrevious}
+        disabled={currentIndex === 0}
+        style={{
+          background: '#22c55e',
+          color: 'white',
+          border: 'none',
+          borderRadius: 8,
+          padding: '12px 36px',
+          fontWeight: 700,
+          fontSize: 20,
+          cursor: currentIndex === 0 ? 'not-allowed' : 'pointer',
+          opacity: currentIndex === 0 ? 0.6 : 1
+        }}
+      >
+        Previous
+      </button>
+      <button
+        onClick={goToNext}
+        disabled={currentIndex === filteredTrajectory.length - 1}
+        style={{
+          background: '#22c55e',
+          color: 'white',
+          border: 'none',
+          borderRadius: 8,
+          padding: '12px 36px',
+          fontWeight: 700,
+          fontSize: 20,
+          cursor: currentIndex === filteredTrajectory.length - 1 ? 'not-allowed' : 'pointer',
+          opacity: currentIndex === filteredTrajectory.length - 1 ? 0.6 : 1
+        }}
+      >
+        Next
+      </button>
+    </div>
   </div>
 
   {currentStep.clustered && (
@@ -651,6 +765,17 @@ function App() {
                                     ));
                                   }}
                                   className="restore-btn"
+                                  style={{
+                                    background: '#22c55e',
+                                    color: 'white',
+                                    border: 'none',
+                                    borderRadius: 6,
+                                    padding: '6px 16px',
+                                    fontWeight: 600,
+                                    marginLeft: 8,
+                                    cursor: 'pointer',
+                                    fontSize: 15
+                                  }}
                                 >Restore</button>
                               : <button
                                   onClick={() => {
@@ -662,6 +787,17 @@ function App() {
                                     setHasUnsavedChanges(true);
                                   }}
                                   className="stale-btn"
+                                  style={{
+                                    background: '#f59e42',
+                                    color: 'white',
+                                    border: 'none',
+                                    borderRadius: 6,
+                                    padding: '6px 16px',
+                                    fontWeight: 600,
+                                    marginLeft: 8,
+                                    cursor: 'pointer',
+                                    fontSize: 15
+                                  }}
                                 >Mark as Stale</button>
                             }
                           </>

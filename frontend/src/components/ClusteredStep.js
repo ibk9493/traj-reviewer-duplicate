@@ -34,7 +34,19 @@ const ClusteredStep = ({ cluster, getStepText, searchQuery, onUncluster, onEditS
         {onUncluster && (
           <button
             onClick={() => onUncluster(cluster)}
-            className="ml-2 px-2 py-1 bg-red-500 text-white rounded text-xs"
+            className="uncluster-btn"
+            style={{
+              marginLeft: 12,
+              background: '#ef4444',
+              color: 'white',
+              border: 'none',
+              borderRadius: 8,
+              padding: '8px 20px',
+              fontWeight: 700,
+              fontSize: 15,
+              cursor: 'pointer',
+              boxShadow: '0 2px 8px rgba(239,68,68,0.08)'
+            }}
             title="Uncluster"
           >
             Uncluster
