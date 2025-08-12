@@ -3,9 +3,12 @@ import './App.css';
 import Chat from './Chat';
 import ClusterControls from './components/ClusterControls';
 import ClusteredStep from './components/ClusteredStep';
+import AuthHeader from './components/AuthHeader';
+import { AuthProvider, useAuth } from './auth/AuthContext';
 import { downloadJSON } from './utils/download';
 import { highlightMatches } from './utils/highlight';
 import { openDB } from 'idb';
+import { API_BASE_URL } from './config';
 
 // IndexedDB utility for app state
 const DB_NAME = 'traj-reviewer';
@@ -40,6 +43,8 @@ async function clearAppState() {
 }
 
 function App() {
+  const { isAuthenticated, loading } = useAuth();
+  
   // Track if we loaded from cache for notification
   const [loadedFromCache, setLoadedFromCache] = useState(false);
   const [trajectory, setTrajectory] = useState([]);
@@ -71,8 +76,9 @@ function App() {
     return '';
   };
 
-  // On mount, try to load from IndexedDB
+  // On mount, try to load from IndexedDB - only run when authenticated
   useEffect(() => {
+    if (!isAuthenticated) return;
     (async () => {
       const cached = await loadAppState();
       if (cached && cached.trajectory && cached.trajectory.length > 0) {
@@ -306,7 +312,7 @@ function App() {
       return;
     }
     try {
-      const response = await fetch('http://localhost:5001/replace', {
+      const response = await fetch(`${API_BASE_URL}/replace`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -387,7 +393,7 @@ function App() {
     const newFileName = prompt("Enter new file name (e.g., 'new_trajectory.json'):", `modified_${fileName}`);
     if (newFileName) {
       try {
-        const response = await fetch('http://localhost:5001/save', {
+        const response = await fetch(`${API_BASE_URL}/save`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -487,12 +493,52 @@ function App() {
     }, 0);
   };
 
+  // Show loading screen while checking authentication
+  if (loading) {
+    return (
+      <div className="App" style={{ 
+        display: 'flex', 
+        justifyContent: 'center', 
+        alignItems: 'center', 
+        height: '100vh',
+        flexDirection: 'column',
+        gap: 16
+      }}>
+        <h1>Trajectory Viewer</h1>
+        <div style={{ color: '#666' }}>Loading...</div>
+      </div>
+    );
+  }
+
+  // Show authentication screen if not logged in
+  if (!isAuthenticated) {
+    return (
+      <div className="App" style={{ 
+        display: 'flex', 
+        justifyContent: 'center', 
+        alignItems: 'center', 
+        height: '100vh',
+        flexDirection: 'column',
+        gap: 24,
+        padding: 20
+      }}>
+        <h1 style={{ marginBottom: 8 }}>Trajectory Viewer</h1>
+        <p style={{ color: '#666', textAlign: 'center', maxWidth: 400 }}>
+          This application is restricted to users with @turing email addresses. 
+          Please sign up or log in to access the trajectory analysis tools.
+        </p>
+        <AuthHeader />
+      </div>
+    );
+  }
+
   return (
     <div className="App">
       <div className="main-layout">
         <div className="trajectory-viewer-container">
           <header className="App-header">
             <h1>Trajectory Viewer</h1>
+            <AuthHeader />
             {loadedFromCache && (
               <div style={{ color: 'orange', fontWeight: 'bold', marginBottom: 8 }}>
                 Loaded from cache (IndexedDB)
@@ -899,4 +945,13 @@ function App() {
   );
 }
 
-export default App;
+// Wrap App with AuthProvider
+function AppWithAuth() {
+  return (
+    <AuthProvider>
+      <App />
+    </AuthProvider>
+  );
+}
+
+export default AppWithAuth;

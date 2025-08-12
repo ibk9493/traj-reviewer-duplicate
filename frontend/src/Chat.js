@@ -1,5 +1,6 @@
 import React, { useState, useRef, useEffect } from 'react';
 import './Chat.css';
+import { API_BASE_URL } from './config';
 
 const Chat = ({ trajectory, onFilter }) => {
   const [messages, setMessages] = useState([]);
@@ -22,7 +23,7 @@ const Chat = ({ trajectory, onFilter }) => {
     setIsLoading(true);
 
     try {
-      const response = await fetch('http://localhost:5001/chat', {
+      const response = await fetch(`${API_BASE_URL}/chat`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ messages: newMessages, trajectory }),
@@ -89,4 +90,4 @@ const Chat = ({ trajectory, onFilter }) => {
   );
 };
 
-export default Chat; 
+export default Chat;
