@@ -16,6 +16,20 @@ module.exports = {
       log_file: "./logs/combined.log",
       instances: 1,
       exec_mode: "fork"
+    },
+    {
+      name: "traj-frontend",
+      script: "serve",
+      args: "-s build -l 9001",
+      cwd: "frontend",
+      interpreter: "none",
+      watch: false,
+      time: true,
+      env: {
+        NODE_ENV: "production"
+      },
+      instances: 1,
+      exec_mode: "fork"
     }
   ]
 };
