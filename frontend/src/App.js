@@ -47,6 +47,8 @@ function App() {
   
   // Track if we loaded from cache for notification
   const [loadedFromCache, setLoadedFromCache] = useState(false);
+  // Track if we've finished hydrating from cache to prevent overwriting
+  const [hydrated, setHydrated] = useState(false);
   const [trajectory, setTrajectory] = useState([]);
   const [filteredTrajectory, setFilteredTrajectory] = useState([]);
   const [currentIndex, setCurrentIndex] = useState(0);
@@ -63,6 +65,7 @@ function App() {
   const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
   const [selectedSteps, setSelectedSteps] = useState([]);
   const [clusters, setClusters] = useState([]);
+  const [startTimestamp, setStartTimestamp] = useState('');
 
   const getStepText = (value, isStepZero = false) => {
     if (!value) return '';
@@ -78,33 +81,43 @@ function App() {
 
   // On mount, try to load from IndexedDB - only run when authenticated
   useEffect(() => {
-    if (!isAuthenticated) return;
+    if (loading) return; // Wait until auth check finishes
+    if (!isAuthenticated) {
+      setHydrated(true); // Allow saving even when not authenticated
+      return;
+    }
     (async () => {
-      const cached = await loadAppState();
-      if (cached && cached.trajectory && cached.trajectory.length > 0) {
-        setTrajectory(cached.trajectory);
-        setFilteredTrajectory(cached.filteredTrajectory || []);
-        setCurrentIndex(cached.currentIndex || 0);
-        setFileName(cached.fileName || '');
-        setSearchQuery(cached.searchQuery || '');
-        setSemanticFilter(cached.semanticFilter || null);
-        setChatKey(cached.chatKey || 0);
-        setFileContent(cached.fileContent || '');
-        setModifiedContent(cached.modifiedContent || '');
-        setReplaceSearch(cached.replaceSearch || '');
-        setReplaceWith(cached.replaceWith || '');
-        setEditingStep(cached.editingStep || null);
-        setEditedThought(cached.editedThought || '');
-        setHasUnsavedChanges(cached.hasUnsavedChanges || false);
-        setSelectedSteps(cached.selectedSteps || []);
-        setClusters(cached.clusters || []);
-        setLoadedFromCache(true);
+      try {
+        const cached = await loadAppState();
+        if (cached && cached.trajectory && cached.trajectory.length > 0) {
+          setTrajectory(cached.trajectory);
+          setFilteredTrajectory(cached.filteredTrajectory || []);
+          setCurrentIndex(cached.currentIndex || 0);
+          setFileName(cached.fileName || '');
+          setSearchQuery(cached.searchQuery || '');
+          setSemanticFilter(cached.semanticFilter || null);
+          setChatKey(cached.chatKey || 0);
+          setFileContent(cached.fileContent || '');
+          setModifiedContent(cached.modifiedContent || '');
+          setReplaceSearch(cached.replaceSearch || '');
+          setReplaceWith(cached.replaceWith || '');
+          setEditingStep(cached.editingStep || null);
+          setEditedThought(cached.editedThought || '');
+          setHasUnsavedChanges(cached.hasUnsavedChanges || false);
+          setSelectedSteps(cached.selectedSteps || []);
+          setClusters(cached.clusters || []);
+          setStartTimestamp(cached.startTimestamp || '');
+          setLoadedFromCache(true);
+        }
+      } finally {
+        setHydrated(true); // Allow saving only after load attempt completes
       }
     })();
-  }, []);
+  }, [isAuthenticated, loading]); // Run when auth ready
 
   // On any relevant state change, save to IndexedDB
   useEffect(() => {
+    if (!hydrated) return; // Don't overwrite cache with empty initial state
     const state = {
       trajectory,
       filteredTrajectory,
@@ -122,9 +135,11 @@ function App() {
       hasUnsavedChanges,
       selectedSteps,
       clusters,
+      startTimestamp,
     };
     saveAppState(state);
   }, [
+    hydrated,
     trajectory,
     filteredTrajectory,
     currentIndex,
@@ -141,6 +156,7 @@ function App() {
     hasUnsavedChanges,
     selectedSteps,
     clusters,
+    startTimestamp,
   ]);
 
   useEffect(() => {
@@ -219,7 +235,12 @@ function App() {
       if (Array.isArray(data)) {
         // Uploaded file is an array (app download)
         if (data.length > 0 && data[0].isStepZero) {
-          processedTrajectory.push(data[0]);
+          const stepZero = data[0];
+          processedTrajectory.push(stepZero);
+          // Restore startTimestamp if present
+          if (stepZero.startTimestamp) {
+            setStartTimestamp(stepZero.startTimestamp);
+          }
           inputTrajectory = data.slice(1);
         } else {
           inputTrajectory = data;
@@ -246,13 +267,22 @@ function App() {
                 observation: step.observations[i],
                 thought: '', // No thought in flat cluster download, can be improved if needed
                 clustered: false,
-                stale: false
+                stale: false,
+                partition: (step.partitions && step.partitions[i]) || null
+              }));
+            }
+            // Apply partitions to existing steps if available
+            if (Array.isArray(step.partitions) && stepsArr.length > 0) {
+              stepsArr = stepsArr.map((s, i) => ({
+                ...s,
+                partition: step.partitions[i] || null
               }));
             }
             return {
               ...step,
               clustered: true,
               stale: !!step.stale,
+              partition: step.partition || null,
               summary: typeof step.summary === 'string' ? step.summary : '',
               steps: stepsArr,
               stepIds: Array.isArray(step.stepIds) ? step.stepIds : [],
@@ -267,7 +297,8 @@ function App() {
               thought: step.thought,
               originalIndex: typeof step.originalIndex === 'number' ? step.originalIndex : index + 1,
               clustered: false,
-              stale: !!step.stale
+              stale: !!step.stale,
+              partition: step.partition || null
             };
           }
         });
@@ -461,13 +492,49 @@ function App() {
 
   const currentStep = filteredTrajectory[currentIndex];
 
+  // Helper function to check if clustering is valid (no blockers)
+  const isClusteringValid = (selectedSteps) => {
+    if (selectedSteps.length === 0) return false;
+    
+    // Build top-level trajectory (excluding Step 0) sorted by originalIndex
+    const topLevel = trajectory
+      .filter(step => !step.isStepZero)
+      .sort((a, b) => a.originalIndex - b.originalIndex);
+    
+    // Find positions in top-level array for each selected step
+    const selectedPositions = selectedSteps
+      .map(stepIndex => topLevel.findIndex(s => s.originalIndex === stepIndex))
+      .filter(pos => pos !== -1)
+      .sort((a, b) => a - b);
+    
+    if (selectedPositions.length === 0) return false;
+    
+    const minPos = selectedPositions[0];
+    const maxPos = selectedPositions[selectedPositions.length - 1];
+    
+    // Find all top-level items between min and max positions
+    const itemsBetween = topLevel.slice(minPos, maxPos + 1);
+    
+    // Find items that are NOT selected and NOT stale (these block clustering)
+    const blockers = itemsBetween.filter(item => 
+      !selectedSteps.includes(item.originalIndex) && !item.stale
+    );
+    
+    return blockers.length === 0;
+  };
+
   const handleCluster = () => {
+    if (selectedSteps.length === 0) return;
+    
+    // Proceed with clustering (validation already done by button disable)
+    const sorted = [...selectedSteps].sort((a, b) => a - b);
+    const minIndex = sorted[0];
+    
     const orderedSteps = trajectory
       .filter(step => selectedSteps.includes(step.originalIndex))
       .flatMap(step => step.clustered ? step.steps : [step])
       .sort((a, b) => a.originalIndex - b.originalIndex);
     const summary = orderedSteps.map(s => s.thought).join(' | ');
-    const minIndex = Math.min(...selectedSteps);
     const stepIds = [...selectedSteps].sort((a, b) => a - b);
     const cluster = {
       stepIds,
@@ -483,6 +550,7 @@ function App() {
     setTrajectory(newTrajectory);
     setClusters(prev => [...prev, cluster]);
     setSelectedSteps([]);
+    setHasUnsavedChanges(true);
     // After clustering, go to the new cluster in the filteredTrajectory
     setTimeout(() => {
       setFilteredTrajectory(ft => {
@@ -564,12 +632,63 @@ function App() {
                 {fileName && <span className="file-name">{fileName}</span>}
               <button
                 onClick={() => {
+                  // Validation: Check for missing partitions, empty thoughts, and start timestamp
+                  const validationErrors = [];
+                  
+                  // Check for start timestamp
+                  if (!startTimestamp) {
+                    validationErrors.push('Step 0: Missing start timestamp');
+                  }
+                  
+                  trajectory.filter(step => !step.isStepZero).forEach(step => {
+                    if (!step.clustered) {
+                      // Normal step validation
+                      if (!step.partition) {
+                        validationErrors.push(`Step ${step.originalIndex}: Missing partition`);
+                      }
+                      if (!step.thought || step.thought.trim() === '') {
+                        validationErrors.push(`Step ${step.originalIndex}: Empty thought`);
+                      }
+                    } else {
+                      // Clustered step validation
+                      if (!step.partition) {
+                        validationErrors.push(`Cluster ${step.stepIds.join(',')}: Missing cluster partition`);
+                      }
+                      if (!step.thought && !step.summary) {
+                        validationErrors.push(`Cluster ${step.stepIds.join(',')}: Empty cluster thought/summary`);
+                      }
+                      // Check internal steps
+                      if (step.steps && Array.isArray(step.steps)) {
+                        step.steps.forEach(internalStep => {
+                          if (!internalStep.partition) {
+                            validationErrors.push(`Step ${internalStep.originalIndex} (in cluster): Missing partition`);
+                          }
+                        });
+                      }
+                    }
+                  });
+                  
+                  if (validationErrors.length > 0) {
+                    alert(`Cannot download JSON. Please fix the following issues:\n\n${validationErrors.join('\n')}`);
+                    return;
+                  }
+                  
+                  // Helper function to generate timestamp for a step
+                  const generateTimestamp = (originalIndex) => {
+                    const startTime = new Date(startTimestamp);
+                    const stepTime = new Date(startTime.getTime() + (originalIndex - 1) * 10000); // 10 seconds per step
+                    return stepTime.toISOString();
+                  };
+                  
                   const transformed = [
-                    // Always include Step 0 if present
-                    ...trajectory.filter(step => step.isStepZero),
-                    // Then include all other non-stale steps
+                    // Always include Step 0 if present with startTimestamp
+                    ...trajectory.filter(step => step.isStepZero).map(step => ({
+                      ...step,
+                      startTimestamp
+                    })),
+                    // Then include all other steps (including stale ones) with timestamps
                     ...trajectory
-                      .filter(step => !step.isStepZero && !step.stale)
+                      .filter(step => !step.isStepZero)
                       .map(step => {
                         if (!step.clustered) {
                           return {
@@ -578,12 +697,15 @@ function App() {
                             thought: step.thought,
                             originalIndex: step.originalIndex,
                             clustered: false,
-                            stale: !!step.stale
+                            stale: !!step.stale,
+                            partition: step.partition || null,
+                            timestamp: generateTimestamp(step.originalIndex)
                           };
                         }
                         const ordered = step.steps
                           .slice()
                           .sort((a, b) => a.originalIndex - b.originalIndex);
+                        const minIndex = Math.min(...step.stepIds);
                         return {
                           originalIndex: step.originalIndex,
                           clustered: true,
@@ -591,7 +713,11 @@ function App() {
                           thought: step.thought || step.summary,
                           actions: ordered.map(s => s.action),
                           observations: ordered.map(s => s.observation),
-                          stale: !!step.stale
+                          stale: !!step.stale,
+                          partition: step.partition || null,
+                          partitions: ordered.map(s => s.partition || null),
+                          timestamp: generateTimestamp(minIndex),
+                          timestamps: step.stepIds.map(id => generateTimestamp(id))
                         };
                       })
                   ];
@@ -652,6 +778,7 @@ function App() {
             selectedSteps={selectedSteps}
             setSelectedSteps={setSelectedSteps}
             onCluster={handleCluster}
+            isClusteringValid={isClusteringValid}
           />
           <div className="flex justify-center mb-4">
             <div className="inline-flex rounded-md shadow-sm" role="group">
@@ -689,6 +816,11 @@ function App() {
 <div className="trajectory-step bg-white shadow-md rounded-lg p-6 space-y-6">
   <div className="step-info">
     Step {currentStep.originalIndex} of {trajectory.length - 1}
+    {currentStep.timestamp && (
+      <span className="timestamp-info" style={{ marginLeft: 16, color: '#666', fontSize: 14 }}>
+        {new Date(currentStep.timestamp).toLocaleString()}
+      </span>
+    )}
     {(searchQuery.trim() || semanticFilter) &&
       <span className="filtered-count">
         {' '}(match {currentIndex + 1} of {filteredTrajectory.length})
@@ -784,56 +916,149 @@ function App() {
   </div>
 
   {currentStep.clustered && (
-    <ClusteredStep
-      cluster={currentStep}
-      getStepText={getStepText}
-      searchQuery={searchQuery}
-      onEditSummary={(cluster, newSummary) => {
-        // Update summary in both clusters and trajectory
-        setClusters(prev =>
-          prev.map(c =>
-            c.stepIds.join(',') === cluster.stepIds.join(',') ? { ...c, summary: newSummary } : c
-          )
-        );
-        setTrajectory(prev =>
-          prev.map(s =>
-            s.clustered && s.stepIds && s.stepIds.join(',') === cluster.stepIds.join(',') ? { ...s, summary: newSummary } : s
-          )
-        );
-      }}
-      onUncluster={(cluster) => {
-        // Remove the cluster from trajectory and clusters
-        setTrajectory(prev => {
-          // Remove the cluster
-          let withoutCluster = prev.filter(
-            step => !(step.clustered && step.stepIds && step.stepIds.join(',') === cluster.stepIds.join(','))
-          );
-          // Restore steps (preserve their properties)
-          const restoredSteps = cluster.steps.map(s => ({
-            ...s,
-            clustered: false
-          }));
-          // Remove any duplicates (in case steps are already present)
-          const allSteps = [
-            ...withoutCluster.filter(s => !restoredSteps.some(r => r.originalIndex === s.originalIndex)),
-            ...restoredSteps
-          ];
-          // Sort by originalIndex
-          return allSteps.sort((a, b) => a.originalIndex - b.originalIndex);
-        });
-        setClusters(prev =>
-          prev.filter(
-            c => !(c.stepIds && c.stepIds.join(',') === cluster.stepIds.join(','))
-          )
-        );
-      }}
-    />
+                <ClusteredStep
+                  cluster={currentStep}
+                  getStepText={getStepText}
+                  searchQuery={searchQuery}
+                  onEditSummary={(cluster, newSummary) => {
+                    // Update summary in both clusters and trajectory
+                    setClusters(prev =>
+                      prev.map(c =>
+                        c.stepIds.join(',') === cluster.stepIds.join(',') ? { ...c, summary: newSummary } : c
+                      )
+                    );
+                    setTrajectory(prev =>
+                      prev.map(s =>
+                        s.clustered && s.stepIds && s.stepIds.join(',') === cluster.stepIds.join(',') ? { ...s, summary: newSummary } : s
+                      )
+                    );
+                  }}
+                  onUpdateCluster={(updatedCluster) => {
+                    // Update cluster in both clusters and trajectory
+                    setClusters(prev =>
+                      prev.map(c =>
+                        c.stepIds.join(',') === updatedCluster.stepIds.join(',') ? updatedCluster : c
+                      )
+                    );
+                    setTrajectory(prev =>
+                      prev.map(s =>
+                        s.clustered && s.stepIds && s.stepIds.join(',') === updatedCluster.stepIds.join(',') ? updatedCluster : s
+                      )
+                    );
+                    setHasUnsavedChanges(true);
+                  }}
+                  onUncluster={(cluster) => {
+                    // Remove the cluster from trajectory and clusters
+                    setTrajectory(prev => {
+                      // Remove the cluster
+                      let withoutCluster = prev.filter(
+                        step => !(step.clustered && step.stepIds && step.stepIds.join(',') === cluster.stepIds.join(','))
+                      );
+                      // Restore steps (preserve their properties)
+                      const restoredSteps = cluster.steps.map(s => ({
+                        ...s,
+                        clustered: false
+                      }));
+                      // Remove any duplicates (in case steps are already present)
+                      const allSteps = [
+                        ...withoutCluster.filter(s => !restoredSteps.some(r => r.originalIndex === s.originalIndex)),
+                        ...restoredSteps
+                      ];
+                      // Sort by originalIndex
+                      return allSteps.sort((a, b) => a.originalIndex - b.originalIndex);
+                    });
+                    setClusters(prev =>
+                      prev.filter(
+                        c => !(c.stepIds && c.stepIds.join(',') === cluster.stepIds.join(','))
+                      )
+                    );
+                  }}
+                />
   )}
                 
                 {currentStep.isStepZero ? (
                   <div className="step-content">
                     <div className="step-item step-zero">
-                      <h2>User Instructions (Step 0)</h2>
+                      <div className="step-header">
+                        <h2>User Instructions (Step 0)</h2>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginTop: 12 }}>
+                          <label style={{ fontSize: 14, fontWeight: 500 }}>Start Time:</label>
+                          <input
+                            type="datetime-local"
+                            value={startTimestamp ? new Date(startTimestamp).toISOString().slice(0, 16) : ''}
+                            onChange={(e) => {
+                              const localDateTime = e.target.value;
+                              if (localDateTime) {
+                                // Convert local datetime to UTC ISO string
+                                const utcTimestamp = new Date(localDateTime).toISOString();
+                                setStartTimestamp(utcTimestamp);
+                                
+                                // Auto-generate timestamps for all steps
+                                const generateTimestamp = (originalIndex) => {
+                                  const startTime = new Date(utcTimestamp);
+                                  const stepTime = new Date(startTime.getTime() + (originalIndex - 1) * 10000); // 10 seconds per step
+                                  return stepTime.toISOString();
+                                };
+                                
+                                // Update all trajectory steps with timestamps
+                                setTrajectory(prev => prev.map(step => {
+                                  if (step.isStepZero) {
+                                    return { ...step, startTimestamp: utcTimestamp };
+                                  } else if (step.clustered) {
+                                    // For clustered steps, add timestamps for both cluster and internal steps
+                                    const minIndex = Math.min(...step.stepIds);
+                                    const updatedSteps = step.steps.map(internalStep => ({
+                                      ...internalStep,
+                                      timestamp: generateTimestamp(internalStep.originalIndex)
+                                    }));
+                                    return {
+                                      ...step,
+                                      timestamp: generateTimestamp(minIndex),
+                                      timestamps: step.stepIds.map(id => generateTimestamp(id)),
+                                      steps: updatedSteps
+                                    };
+                                  } else {
+                                    // For normal steps
+                                    return {
+                                      ...step,
+                                      timestamp: generateTimestamp(step.originalIndex)
+                                    };
+                                  }
+                                }));
+                                
+                                setHasUnsavedChanges(true);
+                              } else {
+                                setStartTimestamp('');
+                                // Clear timestamps when start time is cleared
+                                setTrajectory(prev => prev.map(step => {
+                                  if (step.isStepZero) {
+                                    const { startTimestamp, ...rest } = step;
+                                    return rest;
+                                  } else if (step.clustered) {
+                                    const { timestamp, timestamps, ...rest } = step;
+                                    const updatedSteps = step.steps.map(internalStep => {
+                                      const { timestamp, ...stepRest } = internalStep;
+                                      return stepRest;
+                                    });
+                                    return { ...rest, steps: updatedSteps };
+                                  } else {
+                                    const { timestamp, ...rest } = step;
+                                    return rest;
+                                  }
+                                }));
+                                setHasUnsavedChanges(true);
+                              }
+                            }}
+                            style={{
+                              padding: '4px 8px',
+                              borderRadius: 4,
+                              border: '1px solid #ccc',
+                              fontSize: 14,
+                              minWidth: 200
+                            }}
+                          />
+                        </div>
+                      </div>
                       <p>{highlightMatches(currentStep.content, true, getStepText, searchQuery)}</p>
                     </div>
                   </div>
@@ -848,61 +1073,90 @@ function App() {
                     <div className="step-item border border-gray-200 rounded-md p-4 bg-gray-50">
                       <div className="step-header">
                         <h2>Thought</h2>
-                        {editingStep === currentStep.originalIndex ? (
-                          <div className="edit-buttons">
-                            <button onClick={handleSaveThought} className="save-edit-btn">Save</button>
-                            <button onClick={handleCancelEdit} className="cancel-edit-btn">Cancel</button>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                            <label style={{ fontSize: 14, fontWeight: 500 }}>Partition:</label>
+                            <select
+                              value={currentStep.partition || ''}
+                              onChange={(e) => {
+                                const newPartition = e.target.value || null;
+                                setTrajectory(prev => prev.map(step =>
+                                  step.originalIndex === currentStep.originalIndex
+                                    ? { ...step, partition: newPartition }
+                                    : step
+                                ));
+                                setHasUnsavedChanges(true);
+                              }}
+                              style={{
+                                padding: '4px 8px',
+                                borderRadius: 4,
+                                border: '1px solid #ccc',
+                                fontSize: 14,
+                                minWidth: 140
+                              }}
+                            >
+                              <option value="">None</option>
+                              <option value="EnvironmentSetup">EnvironmentSetup</option>
+                              <option value="FailtoPassUnitTest">FailtoPassUnitTest</option>
+                              <option value="Solution">Solution</option>
+                            </select>
                           </div>
-                        ) : (
-                          <>
-                            <button onClick={() => handleEditThought(currentIndex)} className="edit-btn">Edit</button>
-                            {currentStep.stale
-                              ? <button
-                                  onClick={() => {
-                                    setTrajectory(prev => prev.map(step =>
-                                      step.originalIndex === currentStep.originalIndex
-                                        ? { ...step, stale: false }
-                                        : step
-                                    ));
-                                  }}
-                                  className="restore-btn"
-                                  style={{
-                                    background: '#22c55e',
-                                    color: 'white',
-                                    border: 'none',
-                                    borderRadius: 6,
-                                    padding: '6px 16px',
-                                    fontWeight: 600,
-                                    marginLeft: 8,
-                                    cursor: 'pointer',
-                                    fontSize: 15
-                                  }}
-                                >Restore</button>
-                              : <button
-                                  onClick={() => {
-                                    setTrajectory(prev => prev.map(step =>
-                                      step.originalIndex === currentStep.originalIndex
-                                        ? { ...step, stale: true }
-                                        : step
-                                    ));
-                                    setHasUnsavedChanges(true);
-                                  }}
-                                  className="stale-btn"
-                                  style={{
-                                    background: '#f59e42',
-                                    color: 'white',
-                                    border: 'none',
-                                    borderRadius: 6,
-                                    padding: '6px 16px',
-                                    fontWeight: 600,
-                                    marginLeft: 8,
-                                    cursor: 'pointer',
-                                    fontSize: 15
-                                  }}
-                                >Mark as Stale</button>
-                            }
-                          </>
-                        )}
+                          {editingStep === currentStep.originalIndex ? (
+                            <div className="edit-buttons">
+                              <button onClick={handleSaveThought} className="save-edit-btn">Save</button>
+                              <button onClick={handleCancelEdit} className="cancel-edit-btn">Cancel</button>
+                            </div>
+                          ) : (
+                            <>
+                              <button onClick={() => handleEditThought(currentIndex)} className="edit-btn">Edit</button>
+                              {currentStep.stale
+                                ? <button
+                                    onClick={() => {
+                                      setTrajectory(prev => prev.map(step =>
+                                        step.originalIndex === currentStep.originalIndex
+                                          ? { ...step, stale: false }
+                                          : step
+                                      ));
+                                    }}
+                                    className="restore-btn"
+                                    style={{
+                                      background: '#22c55e',
+                                      color: 'white',
+                                      border: 'none',
+                                      borderRadius: 6,
+                                      padding: '6px 16px',
+                                      fontWeight: 600,
+                                      marginLeft: 8,
+                                      cursor: 'pointer',
+                                      fontSize: 15
+                                    }}
+                                  >Restore</button>
+                                : <button
+                                    onClick={() => {
+                                      setTrajectory(prev => prev.map(step =>
+                                        step.originalIndex === currentStep.originalIndex
+                                          ? { ...step, stale: true }
+                                          : step
+                                      ));
+                                      setHasUnsavedChanges(true);
+                                    }}
+                                    className="stale-btn"
+                                    style={{
+                                      background: '#f59e42',
+                                      color: 'white',
+                                      border: 'none',
+                                      borderRadius: 6,
+                                      padding: '6px 16px',
+                                      fontWeight: 600,
+                                      marginLeft: 8,
+                                      cursor: 'pointer',
+                                      fontSize: 15
+                                    }}
+                                  >Mark as Stale</button>
+                              }
+                            </>
+                          )}
+                        </div>
                       </div>
                       {editingStep === currentStep.originalIndex ? (
                         <textarea

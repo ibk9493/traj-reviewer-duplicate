@@ -1,6 +1,6 @@
 import React from 'react';
 
-const ClusterControls = ({ trajectory, selectedSteps, setSelectedSteps, onCluster }) => {
+const ClusterControls = ({ trajectory, selectedSteps, setSelectedSteps, onCluster, isClusteringValid }) => {
   // Get available step indices (excluding step 0, already clustered, or stale steps)
   const availableSteps = trajectory
     .filter(step => !step.isStepZero && !step.clustered && !step.stale)
@@ -121,9 +121,9 @@ const ClusterControls = ({ trajectory, selectedSteps, setSelectedSteps, onCluste
       </div>
       <button
         onClick={onCluster}
-        disabled={selectedSteps.length < 2}
+        disabled={selectedSteps.length < 2 || !isClusteringValid(selectedSteps)}
         className={`px-4 py-2 rounded text-white font-medium transition-colors duration-200 ${
-          selectedSteps.length >= 2 
+          selectedSteps.length >= 2 && isClusteringValid(selectedSteps)
             ? 'bg-blue-600 hover:bg-blue-700' 
             : 'bg-gray-400 cursor-not-allowed'
         }`}

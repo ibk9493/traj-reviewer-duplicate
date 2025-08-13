@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { highlightMatches } from '../utils/highlight';
 
-const ClusteredStep = ({ cluster, getStepText, searchQuery, onUncluster, onEditSummary }) => {
+const ClusteredStep = ({ cluster, getStepText, searchQuery, onUncluster, onEditSummary, onUpdateCluster }) => {
   const [expanded, setExpanded] = useState(false);
   const [editing, setEditing] = useState(false);
   const [editedSummary, setEditedSummary] = useState(cluster.summary);
@@ -28,6 +28,11 @@ const ClusteredStep = ({ cluster, getStepText, searchQuery, onUncluster, onEditS
     <div className="step-item clustered-step">
       <div className="step-header">
         <h2>Clustered Step ({cluster.stepIds.join(', ')})</h2>
+        {cluster.timestamp && (
+          <span className="timestamp-info" style={{ marginLeft: 16, color: '#666', fontSize: 14 }}>
+            {new Date(cluster.timestamp).toLocaleString()}
+          </span>
+        )}
         <button onClick={() => setExpanded(!expanded)} className="expand-btn">
           {expanded ? 'Collapse' : 'Expand'}
         </button>
@@ -57,32 +62,58 @@ const ClusteredStep = ({ cluster, getStepText, searchQuery, onUncluster, onEditS
       <div className="step-item border border-gray-200 rounded-md p-4 bg-gray-50">
         <div className="step-header">
           <h2>Clustered Thought</h2>
-          {editing ? (
-            <div className="edit-buttons">
-              <button
-                className="save-edit-btn"
-                onClick={() => {
-                  if (onEditSummary) onEditSummary(cluster, editedSummary);
-                  setEditing(false);
+          <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <label style={{ fontSize: 14, fontWeight: 500 }}>Partition:</label>
+              <select
+                value={cluster.partition || ''}
+                onChange={(e) => {
+                  const newPartition = e.target.value || null;
+                  if (onUpdateCluster) {
+                    onUpdateCluster({ ...cluster, partition: newPartition });
+                  }
+                }}
+                style={{
+                  padding: '4px 8px',
+                  borderRadius: 4,
+                  border: '1px solid #ccc',
+                  fontSize: 14,
+                  minWidth: 140
                 }}
               >
-                Save
-              </button>
-              <button
-                className="cancel-edit-btn"
-                onClick={() => {
-                  setEditedSummary(cluster.summary);
-                  setEditing(false);
-                }}
-              >
-                Cancel
-              </button>
+                <option value="">None</option>
+                <option value="EnvironmentSetup">EnvironmentSetup</option>
+                <option value="FailtoPassUnitTest">FailtoPassUnitTest</option>
+                <option value="Solution">Solution</option>
+              </select>
             </div>
-          ) : (
-            <button className="edit-btn" onClick={() => setEditing(true)}>
-              Edit
-            </button>
-          )}
+            {editing ? (
+              <div className="edit-buttons">
+                <button
+                  className="save-edit-btn"
+                  onClick={() => {
+                    if (onEditSummary) onEditSummary(cluster, editedSummary);
+                    setEditing(false);
+                  }}
+                >
+                  Save
+                </button>
+                <button
+                  className="cancel-edit-btn"
+                  onClick={() => {
+                    setEditedSummary(cluster.summary);
+                    setEditing(false);
+                  }}
+                >
+                  Cancel
+                </button>
+              </div>
+            ) : (
+              <button className="edit-btn" onClick={() => setEditing(true)}>
+                Edit
+              </button>
+            )}
+          </div>
         </div>
         {editing ? (
           <textarea
@@ -119,12 +150,43 @@ const ClusteredStep = ({ cluster, getStepText, searchQuery, onUncluster, onEditS
               <div className="step-item border border-gray-200 rounded-md p-4 bg-blue-50 mb-2">
                 <div className="step-header">
                   <h2>Action - Step {step.originalIndex}</h2>
-                  <button 
-                    onClick={() => toggleActionExpansion(step.originalIndex)}
-                    className="expand-btn text-sm"
-                  >
-                    {expandedActions.has(step.originalIndex) ? 'Hide Observation' : 'Show Observation'}
-                  </button>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                      <label style={{ fontSize: 12, fontWeight: 500 }}>Partition:</label>
+                      <select
+                        value={step.partition || ''}
+                        onChange={(e) => {
+                          const newPartition = e.target.value || null;
+                          if (onUpdateCluster) {
+                            const updatedSteps = cluster.steps.map(s =>
+                              s.originalIndex === step.originalIndex
+                                ? { ...s, partition: newPartition }
+                                : s
+                            );
+                            onUpdateCluster({ ...cluster, steps: updatedSteps });
+                          }
+                        }}
+                        style={{
+                          padding: '2px 6px',
+                          borderRadius: 4,
+                          border: '1px solid #ccc',
+                          fontSize: 12,
+                          minWidth: 120
+                        }}
+                      >
+                        <option value="">None</option>
+                        <option value="EnvironmentSetup">EnvironmentSetup</option>
+                        <option value="FailtoPassUnitTest">FailtoPassUnitTest</option>
+                        <option value="Solution">Solution</option>
+                      </select>
+                    </div>
+                    <button 
+                      onClick={() => toggleActionExpansion(step.originalIndex)}
+                      className="expand-btn text-sm"
+                    >
+                      {expandedActions.has(step.originalIndex) ? 'Hide Observation' : 'Show Observation'}
+                    </button>
+                  </div>
                 </div>
                 <p className="text-sm text-gray-800 whitespace-pre-wrap">
                   {highlightMatches(step.action, false, getStepText, searchQuery)}
