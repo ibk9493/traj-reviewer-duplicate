@@ -9,6 +9,12 @@ import { downloadJSON } from './utils/download';
 import { highlightMatches } from './utils/highlight';
 import { openDB } from 'idb';
 import { API_BASE_URL } from './config';
+import { 
+  detectFormat, 
+  annotationTraceToViewerSteps, 
+  updateAnnotationTraceFromEdits, 
+  generateTimestampsFromStart 
+} from './utils/annotationAdapter';
 
 // IndexedDB utility for app state
 const DB_NAME = 'traj-reviewer';
@@ -66,6 +72,22 @@ function App() {
   const [selectedSteps, setSelectedSteps] = useState([]);
   const [clusters, setClusters] = useState([]);
   const [startTimestamp, setStartTimestamp] = useState('');
+  
+  // New state for annotationTrace support
+  const [sourceFormat, setSourceFormat] = useState(null); // 'annotationTrace-array', 'annotationTrace-wrapper', 'legacy-array', 'legacy-wrapper'
+  const [sourceDoc, setSourceDoc] = useState(null); // Original uploaded document
+  const [annoIndexByOriginalIndex, setAnnoIndexByOriginalIndex] = useState(new Map()); // Mapping for edits
+  
+  // New state for adding steps
+  const [isAddingStep, setIsAddingStep] = useState(false);
+  const [newStep, setNewStep] = useState({
+    thought: '',
+    action: '',
+    actionType: 'add_thought',
+    observation: '',
+    partition: 'EnvironmentSetup',
+    details: {}
+  });
 
   const getStepText = (value, isStepZero = false) => {
     if (!value) return '';
@@ -203,119 +225,134 @@ function App() {
   const loadTrajectory = (contentString, filename = '') => {
     try {
       const data = JSON.parse(contentString);
+      const formatInfo = detectFormat(data);
+      
+      console.log('DEBUG: Detected format:', formatInfo.format);
+      
+      // Store source information for round-trip export
+      setSourceFormat(formatInfo.format);
+      setSourceDoc(formatInfo.fullDoc || data);
+      
       let processedTrajectory = [];
-
-      // Parse filename for repo information
-      const parseRepo = (filename) => {
-        // Pattern: <repo owner>__<repo name>-<issue id (int)>.<some extension>
-        const match = filename.match(/^(.+?)__(.+?)-(\d+)\./);
-        if (match) {
-          const [, owner, name] = match;
-          return `${owner}/${name}`;
+      let indexMapping = new Map();
+      
+      if (formatInfo.format.startsWith('annotationTrace')) {
+        // Handle annotationTrace format
+        const { steps, annoIndexByOriginalIndex } = annotationTraceToViewerSteps(formatInfo.annotationTrace);
+        processedTrajectory = steps;
+        setAnnoIndexByOriginalIndex(annoIndexByOriginalIndex);
+        
+        // Extract start timestamp from Step 0 if present
+        const stepZero = steps.find(step => step.isStepZero);
+        if (stepZero && stepZero.startTimestamp) {
+          setStartTimestamp(stepZero.startTimestamp);
         }
-        return null;
-      };
-
-      // Handle Step 0 from history (tool output format)
-      if (data.history && data.history.length > 1) {
-        const stepZero = {
-          content: data.history[1].content,
-          isStepZero: true,
+        
+      } else {
+        // Handle legacy format (existing logic)
+        const parseRepo = (filename) => {
+          const match = filename.match(/^(.+?)__(.+?)-(\d+)\./);
+          if (match) {
+            const [, owner, name] = match;
+            return `${owner}/${name}`;
+          }
+          return null;
         };
-        // Add repo information if filename matches pattern
-        const repo = parseRepo(filename);
-        if (repo) {
-          stepZero.repo = repo;
-        }
-        processedTrajectory.push(stepZero);
-      }
 
-      // Handle Step 0 from array (app download format)
-      let inputTrajectory = [];
-      if (Array.isArray(data)) {
-        // Uploaded file is an array (app download)
-        if (data.length > 0 && data[0].isStepZero) {
-          const stepZero = data[0];
+        // Handle Step 0 from history (tool output format)
+        if (data.history && data.history.length > 1) {
+          const stepZero = {
+            content: data.history[1].content,
+            isStepZero: true,
+          };
+          const repo = parseRepo(filename);
+          if (repo) {
+            stepZero.repo = repo;
+          }
           processedTrajectory.push(stepZero);
-          // Restore startTimestamp if present
-          if (stepZero.startTimestamp) {
-            setStartTimestamp(stepZero.startTimestamp);
-          }
-          inputTrajectory = data.slice(1);
-        } else {
-          inputTrajectory = data;
         }
-      } else if (data.trajectory && Array.isArray(data.trajectory)) {
-        // Uploaded file is an object with trajectory key (tool output)
-        inputTrajectory = data.trajectory;
-      }
-      if (inputTrajectory.length > 0) {
-        const enhancedTrajectory = inputTrajectory.map((step, index) => {
-          const isCluster =
-            step.clustered === true &&
-            Array.isArray(step.stepIds) &&
-            (Array.isArray(step.steps) || (Array.isArray(step.actions) && Array.isArray(step.observations)));
-          // Debug: log each step and cluster detection
-          console.log('DEBUG: step at upload:', step, 'isCluster:', isCluster);
-          if (isCluster) {
-            // If steps is missing but actions/observations are present, reconstruct steps
-            let stepsArr = Array.isArray(step.steps) ? step.steps : [];
-            if ((!stepsArr || stepsArr.length === 0) && Array.isArray(step.actions) && Array.isArray(step.observations)) {
-              stepsArr = step.stepIds.map((id, i) => ({
-                originalIndex: id,
-                action: step.actions[i],
-                observation: step.observations[i],
-                thought: '', // No thought in flat cluster download, can be improved if needed
-                clustered: false,
-                stale: false,
-                partition: (step.partitions && step.partitions[i]) || null
-              }));
+
+        // Handle Step 0 from array (app download format)
+        let inputTrajectory = [];
+        if (Array.isArray(data)) {
+          if (data.length > 0 && data[0].isStepZero) {
+            const stepZero = data[0];
+            processedTrajectory.push(stepZero);
+            if (stepZero.startTimestamp) {
+              setStartTimestamp(stepZero.startTimestamp);
             }
-            // Apply partitions to existing steps if available
-            if (Array.isArray(step.partitions) && stepsArr.length > 0) {
-              stepsArr = stepsArr.map((s, i) => ({
-                ...s,
-                partition: step.partitions[i] || null
-              }));
-            }
-            return {
-              ...step,
-              clustered: true,
-              stale: !!step.stale,
-              partition: step.partition || null,
-              summary: typeof step.summary === 'string' ? step.summary : '',
-              steps: stepsArr,
-              stepIds: Array.isArray(step.stepIds) ? step.stepIds : [],
-              // Ensure originalIndex is present
-              originalIndex: typeof step.originalIndex === 'number' ? step.originalIndex : index + 1
-            };
+            inputTrajectory = data.slice(1);
           } else {
-            // Normal step (tool output or app)
-            return {
-              action: step.action,
-              observation: step.observation,
-              thought: step.thought,
-              originalIndex: typeof step.originalIndex === 'number' ? step.originalIndex : index + 1,
-              clustered: false,
-              stale: !!step.stale,
-              partition: step.partition || null
-            };
+            inputTrajectory = data;
           }
-        });
-        processedTrajectory = [...processedTrajectory, ...enhancedTrajectory];
+        } else if (data.trajectory && Array.isArray(data.trajectory)) {
+          inputTrajectory = data.trajectory;
+        }
+        
+        if (inputTrajectory.length > 0) {
+          const enhancedTrajectory = inputTrajectory.map((step, index) => {
+            const isCluster =
+              step.clustered === true &&
+              Array.isArray(step.stepIds) &&
+              (Array.isArray(step.steps) || (Array.isArray(step.actions) && Array.isArray(step.observations)));
+            
+            if (isCluster) {
+              let stepsArr = Array.isArray(step.steps) ? step.steps : [];
+              if ((!stepsArr || stepsArr.length === 0) && Array.isArray(step.actions) && Array.isArray(step.observations)) {
+                stepsArr = step.stepIds.map((id, i) => ({
+                  originalIndex: id,
+                  action: step.actions[i],
+                  observation: step.observations[i],
+                  thought: '',
+                  clustered: false,
+                  stale: false,
+                  partition: (step.partitions && step.partitions[i]) || null
+                }));
+              }
+              if (Array.isArray(step.partitions) && stepsArr.length > 0) {
+                stepsArr = stepsArr.map((s, i) => ({
+                  ...s,
+                  partition: step.partitions[i] || null
+                }));
+              }
+              return {
+                ...step,
+                clustered: true,
+                stale: !!step.stale,
+                partition: step.partition || null,
+                summary: typeof step.summary === 'string' ? step.summary : '',
+                steps: stepsArr,
+                stepIds: Array.isArray(step.stepIds) ? step.stepIds : [],
+                originalIndex: typeof step.originalIndex === 'number' ? step.originalIndex : index + 1
+              };
+            } else {
+              return {
+                action: step.action,
+                observation: step.observation,
+                thought: step.thought,
+                originalIndex: typeof step.originalIndex === 'number' ? step.originalIndex : index + 1,
+                clustered: false,
+                stale: !!step.stale,
+                partition: step.partition || null
+              };
+            }
+          });
+          processedTrajectory = [...processedTrajectory, ...enhancedTrajectory];
+        }
       }
       
       setTrajectory(processedTrajectory);
-      // Reconstruct clusters array from loaded trajectory
       setClusters(processedTrajectory.filter(step => step.clustered));
-      // Debug: log loaded trajectory and clusters
+      
       console.log('DEBUG: loaded trajectory after upload:', processedTrajectory);
-      console.log('DEBUG: loaded clusters after upload:', processedTrajectory.filter(step => step.clustered));
+      console.log('DEBUG: source format:', formatInfo.format);
+      
       // Reset all filters and the chat component
       handleClearFilters();
-      setCurrentIndex(0); // Reset to first step when clearing filters
+      setCurrentIndex(0);
       setChatKey(key => key + 1);
       setHasUnsavedChanges(false);
+      
     } catch (error) {
       alert('Error parsing JSON file.');
       console.error("File parsing error:", error);
@@ -561,6 +598,138 @@ function App() {
     }, 0);
   };
 
+  // Add new step functionality
+  const handleAddStep = () => {
+    setIsAddingStep(true);
+    // Reset new step form
+    setNewStep({
+      thought: '',
+      action: '',
+      actionType: 'add_thought',
+      observation: '',
+      partition: 'EnvironmentSetup',
+      details: {}
+    });
+  };
+
+  const handleSaveNewStep = () => {
+    // Get the current step's originalIndex to insert after it
+    const currentStepOriginalIndex = currentStep ? currentStep.originalIndex : 0;
+    
+    // Find all steps that come after the current step and increment their originalIndex
+    const updatedTrajectory = trajectory.map(step => {
+      if (!step.isStepZero && step.originalIndex > currentStepOriginalIndex) {
+        return { ...step, originalIndex: step.originalIndex + 1 };
+      }
+      return step;
+    });
+    
+    // Create the new step with originalIndex = currentStepOriginalIndex + 1
+    const newOriginalIndex = currentStepOriginalIndex + 1;
+    
+    // Generate timestamp
+    const now = new Date().toISOString();
+    
+    // Create the new step based on format
+    let createdStep;
+    if (sourceFormat && sourceFormat.startsWith('annotationTrace')) {
+      // For annotationTrace format, create with actionType and details
+      createdStep = {
+        originalIndex: newOriginalIndex,
+        thought: newStep.thought,
+        action: newStep.action || getActionDetailsString(newStep.actionType, newStep.details),
+        observation: newStep.observation,
+        partition: newStep.partition,
+        timestamp: now,
+        clustered: false,
+        stale: false,
+        actionType: newStep.actionType,
+        details: newStep.details, // Store the actual details object
+        isNewStep: true // Mark as user-created
+      };
+    } else {
+      // For legacy format
+      createdStep = {
+        originalIndex: newOriginalIndex,
+        thought: newStep.thought,
+        action: newStep.action,
+        observation: newStep.observation,
+        partition: newStep.partition,
+        timestamp: now,
+        clustered: false,
+        stale: false,
+        isNewStep: true // Mark as user-created
+      };
+    }
+    
+    // Add the new step to the updated trajectory
+    const finalTrajectory = [...updatedTrajectory, createdStep].sort((a, b) => a.originalIndex - b.originalIndex);
+    setTrajectory(finalTrajectory);
+    setHasUnsavedChanges(true);
+    setIsAddingStep(false);
+    
+    // Navigate to the new step (it will be right after the current step)
+    setTimeout(() => {
+      // Find the new step in the filtered trajectory
+      const newStepIndex = filteredTrajectory.findIndex(step => step.originalIndex === newOriginalIndex);
+      if (newStepIndex !== -1) {
+        setCurrentIndex(newStepIndex);
+      } else {
+        // If not found in filtered, it means we need to update the current index based on the new trajectory
+        setCurrentIndex(currentIndex + 1);
+      }
+    }, 100);
+  };
+
+  const handleCancelNewStep = () => {
+    setIsAddingStep(false);
+    setNewStep({
+      thought: '',
+      action: '',
+      actionType: 'add_thought',
+      observation: '',
+      partition: 'EnvironmentSetup',
+      details: {}
+    });
+  };
+
+  // Helper function to generate action details string based on action type
+  const getActionDetailsString = (actionType, details) => {
+    switch (actionType) {
+      case 'execute_terminal_command':
+        return details.command || 'command';
+      case 'open_file':
+      case 'create_file':
+      case 'delete_file':
+      case 'close_file':
+        return details.file || 'filename';
+      case 'search_string':
+        return `"${details.searchKey || 'search term'}" in ${details.path || 'path'}`;
+      case 'search_web':
+        return `"${details.query || 'search query'}"`;
+      case 'find_and_replace_code':
+        return details.file || 'filename';
+      case 'select_code_chunks':
+        return details.file || 'filename';
+      case 'add_thought':
+        return 'Adding thought';
+      default:
+        return actionType.replace(/_/g, ' ');
+    }
+  };
+
+  // Update details based on action type
+  const updateNewStepDetails = (actionType, field, value) => {
+    setNewStep(prev => ({
+      ...prev,
+      actionType,
+      details: {
+        ...prev.details,
+        [field]: value
+      }
+    }));
+  };
+
   // Show loading screen while checking authentication
   if (loading) {
     return (
@@ -630,98 +799,228 @@ function App() {
                   Upload JSON
                 </label>
                 {fileName && <span className="file-name">{fileName}</span>}
+                {sourceFormat && sourceFormat.startsWith('annotationTrace') && (
+                  <div style={{ 
+                    color: '#059669', 
+                    fontWeight: 'bold', 
+                    fontSize: 12, 
+                    marginLeft: 8,
+                    padding: '2px 8px',
+                    background: '#d1fae5',
+                    borderRadius: 4,
+                    border: '1px solid #059669'
+                  }}>
+                    AnnotationTrace Format
+                  </div>
+                )}
               <button
                 onClick={() => {
-                  // Validation: Check for missing partitions, empty thoughts, and start timestamp
-                  const validationErrors = [];
-                  
-                  // Check for start timestamp
-                  if (!startTimestamp) {
-                    validationErrors.push('Step 0: Missing start timestamp');
-                  }
-                  
-                  trajectory.filter(step => !step.isStepZero).forEach(step => {
-                    if (!step.clustered) {
-                      // Normal step validation
-                      if (!step.partition) {
-                        validationErrors.push(`Step ${step.originalIndex}: Missing partition`);
+                  if (sourceFormat && sourceFormat.startsWith('annotationTrace')) {
+                    // Handle annotationTrace export with round-trip support
+                    const validationErrors = [];
+                    
+                    // Relaxed validation for annotationTrace (thoughts not required)
+                    trajectory.filter(step => !step.isStepZero).forEach(step => {
+                      if (!step.clustered) {
+                        if (!step.partition) {
+                          validationErrors.push(`Step ${step.originalIndex}: Missing partition`);
+                        }
+                      } else {
+                        if (!step.partition) {
+                          validationErrors.push(`Cluster ${step.stepIds.join(',')}: Missing cluster partition`);
+                        }
+                        if (step.steps && Array.isArray(step.steps)) {
+                          step.steps.forEach(internalStep => {
+                            if (!internalStep.partition) {
+                              validationErrors.push(`Step ${internalStep.originalIndex} (in cluster): Missing partition`);
+                            }
+                          });
+                        }
                       }
-                      if (!step.thought || step.thought.trim() === '') {
-                        validationErrors.push(`Step ${step.originalIndex}: Empty thought`);
-                      }
-                    } else {
-                      // Clustered step validation
-                      if (!step.partition) {
-                        validationErrors.push(`Cluster ${step.stepIds.join(',')}: Missing cluster partition`);
-                      }
-                      if (!step.thought && !step.summary) {
-                        validationErrors.push(`Cluster ${step.stepIds.join(',')}: Empty cluster thought/summary`);
-                      }
-                      // Check internal steps
-                      if (step.steps && Array.isArray(step.steps)) {
-                        step.steps.forEach(internalStep => {
-                          if (!internalStep.partition) {
-                            validationErrors.push(`Step ${internalStep.originalIndex} (in cluster): Missing partition`);
+                    });
+                    
+                    if (validationErrors.length > 0) {
+                      alert(`Cannot download JSON. Please fix the following issues:\n\n${validationErrors.join('\n')}`);
+                      return;
+                    }
+                    
+                    // Collect edits and new steps from the UI
+                    const edits = [];
+                    const newSteps = [];
+                    
+                    trajectory.filter(step => !step.isStepZero && !step.clustered).forEach(step => {
+                      if (step.isNewStep) {
+                        // This is a new step added through the UI
+                        // Use the stored details object directly, or fall back to extracting from action text
+                        let stepDetails = step.details || {};
+                        
+                        // If details weren't stored properly, try to extract from action text as fallback
+                        if (Object.keys(stepDetails).length === 0) {
+                          if (step.actionType === 'create_file' || step.actionType === 'open_file' || 
+                              step.actionType === 'delete_file' || step.actionType === 'close_file' ||
+                              step.actionType === 'find_and_replace_code' || step.actionType === 'select_code_chunks') {
+                            stepDetails = { file: step.action };
+                          } else if (step.actionType === 'execute_terminal_command') {
+                            stepDetails = { command: step.action };
+                          } else if (step.actionType === 'search_string') {
+                            const parts = step.action.split(' in ');
+                            stepDetails = { 
+                              searchKey: parts[0]?.replace(/"/g, '') || step.action,
+                              path: parts[1] || ''
+                            };
+                          } else if (step.actionType === 'search_web') {
+                            stepDetails = { query: step.action.replace(/"/g, '') };
                           }
+                        }
+                        
+                        newSteps.push({
+                          originalIndex: step.originalIndex,
+                          action: step.actionType || 'add_thought',
+                          details: stepDetails,
+                          thought: step.thought,
+                          partition: step.partition,
+                          timestamp: step.timestamp,
+                          elapsed_seconds: 0,
+                          duration_seconds: 0
+                        });
+                      } else {
+                        // This is an existing step with edits
+                        edits.push({
+                          originalIndex: step.originalIndex,
+                          thought: step.thought,
+                          partition: step.partition,
+                          timestamp: step.timestamp
                         });
                       }
+                    });
+                    
+                    // Update the original annotationTrace with edits
+                    let updatedAnnotationTrace = updateAnnotationTraceFromEdits(
+                      sourceDoc.annotationTrace || sourceDoc,
+                      edits,
+                      annoIndexByOriginalIndex
+                    );
+                    
+                    // Insert new steps into the annotationTrace at the correct positions
+                    newSteps.forEach(newStep => {
+                      const insertIndex = updatedAnnotationTrace.findIndex(item => 
+                        item.action !== 'begin_interaction' && item.action !== 'end_interaction'
+                      ) + newStep.originalIndex - 1;
+                      
+                      updatedAnnotationTrace.splice(Math.max(0, insertIndex), 0, {
+                        action: newStep.action,
+                        details: newStep.details,
+                        thought: newStep.thought,
+                        timestamp: newStep.timestamp,
+                        elapsed_seconds: newStep.elapsed_seconds,
+                        duration_seconds: newStep.duration_seconds,
+                        partition: newStep.partition
+                      });
+                    });
+                    
+                    // Apply timestamp generation if start time was set
+                    if (startTimestamp) {
+                      updatedAnnotationTrace = generateTimestampsFromStart(updatedAnnotationTrace, startTimestamp);
                     }
-                  });
-                  
-                  if (validationErrors.length > 0) {
-                    alert(`Cannot download JSON. Please fix the following issues:\n\n${validationErrors.join('\n')}`);
-                    return;
-                  }
-                  
-                  // Helper function to generate timestamp for a step
-                  const generateTimestamp = (originalIndex) => {
-                    const startTime = new Date(startTimestamp);
-                    const stepTime = new Date(startTime.getTime() + (originalIndex - 1) * 10000); // 10 seconds per step
-                    return stepTime.toISOString();
-                  };
-                  
-                  const transformed = [
-                    // Always include Step 0 if present with startTimestamp
-                    ...trajectory.filter(step => step.isStepZero).map(step => ({
-                      ...step,
-                      startTimestamp
-                    })),
-                    // Then include all other steps (including stale ones) with timestamps
-                    ...trajectory
-                      .filter(step => !step.isStepZero)
-                      .map(step => {
-                        if (!step.clustered) {
+                    
+                    // Export based on source format
+                    if (sourceFormat === 'annotationTrace-wrapper') {
+                      // Full document with annotationTrace
+                      const updatedDoc = {
+                        ...sourceDoc,
+                        annotationTrace: updatedAnnotationTrace
+                      };
+                      downloadJSON(updatedDoc, 'updated_annotation_trace.json');
+                    } else {
+                      // Just the annotationTrace array
+                      downloadJSON(updatedAnnotationTrace, 'updated_annotation_trace.json');
+                    }
+                    
+                  } else {
+                    // Legacy format validation and export
+                    const validationErrors = [];
+                    
+                    if (!startTimestamp) {
+                      validationErrors.push('Step 0: Missing start timestamp');
+                    }
+                    
+                    trajectory.filter(step => !step.isStepZero).forEach(step => {
+                      if (!step.clustered) {
+                        if (!step.partition) {
+                          validationErrors.push(`Step ${step.originalIndex}: Missing partition`);
+                        }
+                        if (!step.thought || step.thought.trim() === '') {
+                          validationErrors.push(`Step ${step.originalIndex}: Empty thought`);
+                        }
+                      } else {
+                        if (!step.partition) {
+                          validationErrors.push(`Cluster ${step.stepIds.join(',')}: Missing cluster partition`);
+                        }
+                        if (!step.thought && !step.summary) {
+                          validationErrors.push(`Cluster ${step.stepIds.join(',')}: Empty cluster thought/summary`);
+                        }
+                        if (step.steps && Array.isArray(step.steps)) {
+                          step.steps.forEach(internalStep => {
+                            if (!internalStep.partition) {
+                              validationErrors.push(`Step ${internalStep.originalIndex} (in cluster): Missing partition`);
+                            }
+                          });
+                        }
+                      }
+                    });
+                    
+                    if (validationErrors.length > 0) {
+                      alert(`Cannot download JSON. Please fix the following issues:\n\n${validationErrors.join('\n')}`);
+                      return;
+                    }
+                    
+                    const generateTimestamp = (originalIndex) => {
+                      const startTime = new Date(startTimestamp);
+                      const stepTime = new Date(startTime.getTime() + (originalIndex - 1) * 10000);
+                      return stepTime.toISOString();
+                    };
+                    
+                    const transformed = [
+                      ...trajectory.filter(step => step.isStepZero).map(step => ({
+                        ...step,
+                        startTimestamp
+                      })),
+                      ...trajectory
+                        .filter(step => !step.isStepZero)
+                        .map(step => {
+                          if (!step.clustered) {
+                            return {
+                              action: step.action,
+                              observation: step.observation,
+                              thought: step.thought,
+                              originalIndex: step.originalIndex,
+                              clustered: false,
+                              stale: !!step.stale,
+                              partition: step.partition || null,
+                              timestamp: generateTimestamp(step.originalIndex)
+                            };
+                          }
+                          const ordered = step.steps
+                            .slice()
+                            .sort((a, b) => a.originalIndex - b.originalIndex);
+                          const minIndex = Math.min(...step.stepIds);
                           return {
-                            action: step.action,
-                            observation: step.observation,
-                            thought: step.thought,
                             originalIndex: step.originalIndex,
-                            clustered: false,
+                            clustered: true,
+                            stepIds: step.stepIds,
+                            thought: step.thought || step.summary,
+                            actions: ordered.map(s => s.action),
+                            observations: ordered.map(s => s.observation),
                             stale: !!step.stale,
                             partition: step.partition || null,
-                            timestamp: generateTimestamp(step.originalIndex)
+                            partitions: ordered.map(s => s.partition || null),
+                            timestamp: generateTimestamp(minIndex),
+                            timestamps: step.stepIds.map(id => generateTimestamp(id))
                           };
-                        }
-                        const ordered = step.steps
-                          .slice()
-                          .sort((a, b) => a.originalIndex - b.originalIndex);
-                        const minIndex = Math.min(...step.stepIds);
-                        return {
-                          originalIndex: step.originalIndex,
-                          clustered: true,
-                          stepIds: step.stepIds,
-                          thought: step.thought || step.summary,
-                          actions: ordered.map(s => s.action),
-                          observations: ordered.map(s => s.observation),
-                          stale: !!step.stale,
-                          partition: step.partition || null,
-                          partitions: ordered.map(s => s.partition || null),
-                          timestamp: generateTimestamp(minIndex),
-                          timestamps: step.stepIds.map(id => generateTimestamp(id))
-                        };
-                      })
-                  ];
-                  downloadJSON(transformed, 'updated_trajectory.json');
+                        })
+                    ];
+                    downloadJSON(transformed, 'updated_trajectory.json');
+                  }
                 }}
                 className="download-json-btn"
                 style={{
@@ -912,6 +1211,30 @@ function App() {
       >
         Next
       </button>
+      {trajectory.length > 0 && (
+        <button
+          onClick={handleAddStep}
+          disabled={isAddingStep}
+          style={{
+            background: '#8b5cf6',
+            color: 'white',
+            border: 'none',
+            borderRadius: 8,
+            padding: '12px 24px',
+            fontWeight: 700,
+            fontSize: 20,
+            cursor: isAddingStep ? 'not-allowed' : 'pointer',
+            opacity: isAddingStep ? 0.6 : 1,
+            display: 'flex',
+            alignItems: 'center',
+            gap: 8
+          }}
+          title="Add new step"
+        >
+          <span style={{ fontSize: 24 }}>+</span>
+          Add Step
+        </button>
+      )}
     </div>
   </div>
 
@@ -1171,7 +1494,30 @@ function App() {
                     </div>
                     <div className="step-item">
                       <h2>Action</h2>
-                      <p>{highlightMatches(currentStep.action, false, getStepText, searchQuery)}</p>
+                      {sourceFormat && sourceFormat.startsWith('annotationTrace') ? (
+                        <div>
+                          <div style={{ 
+                            display: 'inline-block',
+                            background: '#e0f2fe',
+                            color: '#0277bd',
+                            padding: '6px 12px',
+                            borderRadius: 6,
+                            fontSize: 14,
+                            fontWeight: 600,
+                            border: '1px solid #0277bd',
+                            marginBottom: 8
+                          }}>
+                            {currentStep.actionType?.replace(/_/g, ' ') || 'unknown action'}
+                          </div>
+                          {currentStep.action && currentStep.action.trim() && (
+                            <p style={{ marginTop: 8, fontSize: 14, color: '#374151' }}>
+                              {highlightMatches(currentStep.action, false, getStepText, searchQuery)}
+                            </p>
+                          )}
+                        </div>
+                      ) : (
+                        <p>{highlightMatches(currentStep.action, false, getStepText, searchQuery)}</p>
+                      )}
                     </div>
                     <div className="step-item">
                       <h2>Observation</h2>
@@ -1187,6 +1533,520 @@ function App() {
                     ? "No steps match your search criteria."
                     : "Please upload a trajectory JSON file to begin."}
                 </p>
+              </div>
+            )}
+            
+            {/* Add New Step Form */}
+            {isAddingStep && (
+              <div className="new-step-form bg-white shadow-md rounded-lg p-6 mt-6 border-2 border-purple-300">
+                <h2 style={{ fontSize: 24, fontWeight: 'bold', marginBottom: 16, color: '#8b5cf6' }}>
+                  Add New Step
+                </h2>
+                
+                <div className="form-grid" style={{ display: 'grid', gap: 16 }}>
+                  {/* Partition Selection */}
+                  <div>
+                    <label style={{ display: 'block', fontSize: 14, fontWeight: 500, marginBottom: 4 }}>
+                      Partition *
+                    </label>
+                    <select
+                      value={newStep.partition}
+                      onChange={(e) => setNewStep(prev => ({ ...prev, partition: e.target.value }))}
+                      style={{
+                        width: '100%',
+                        padding: '8px 12px',
+                        borderRadius: 4,
+                        border: '1px solid #ccc',
+                        fontSize: 14
+                      }}
+                    >
+                      <option value="EnvironmentSetup">EnvironmentSetup</option>
+                      <option value="FailtoPassUnitTest">FailtoPassUnitTest</option>
+                      <option value="Solution">Solution</option>
+                    </select>
+                  </div>
+
+                  {/* Action Type (for annotationTrace format) */}
+                  {sourceFormat && sourceFormat.startsWith('annotationTrace') && (
+                    <div>
+                      <label style={{ display: 'block', fontSize: 14, fontWeight: 500, marginBottom: 4 }}>
+                        Action Type *
+                      </label>
+                      <select
+                        value={newStep.actionType}
+                        onChange={(e) => {
+                          const actionType = e.target.value;
+                          setNewStep(prev => ({ 
+                            ...prev, 
+                            actionType,
+                            details: {} // Reset details when action type changes
+                          }));
+                        }}
+                        style={{
+                          width: '100%',
+                          padding: '8px 12px',
+                          borderRadius: 4,
+                          border: '1px solid #ccc',
+                          fontSize: 14
+                        }}
+                      >
+                        <option value="add_thought">Add Thought</option>
+                        <option value="execute_terminal_command">Execute Terminal Command</option>
+                        <option value="open_file">Open File</option>
+                        <option value="create_file">Create File</option>
+                        <option value="delete_file">Delete File</option>
+                        <option value="close_file">Close File</option>
+                        <option value="search_string">Search String</option>
+                        <option value="search_web">Search Web</option>
+                        <option value="find_and_replace_code">Find and Replace Code</option>
+                        <option value="select_code_chunks">Select Code Chunks</option>
+                      </select>
+                    </div>
+                  )}
+
+                  {/* Action Details (dynamic based on action type) */}
+                  {sourceFormat && sourceFormat.startsWith('annotationTrace') && (
+                    <div>
+                      <label style={{ display: 'block', fontSize: 14, fontWeight: 500, marginBottom: 4 }}>
+                        Action Details
+                      </label>
+                      {newStep.actionType === 'execute_terminal_command' && (
+                        <div style={{ display: 'grid', gap: 8 }}>
+                          <input
+                            type="text"
+                            placeholder="Command *"
+                            value={newStep.details.command || ''}
+                            onChange={(e) => updateNewStepDetails(newStep.actionType, 'command', e.target.value)}
+                            style={{
+                              width: '100%',
+                              padding: '8px 12px',
+                              borderRadius: 4,
+                              border: '1px solid #ccc',
+                              fontSize: 14
+                            }}
+                          />
+                          <input
+                            type="text"
+                            placeholder="Directory (optional)"
+                            value={newStep.details.directory || ''}
+                            onChange={(e) => updateNewStepDetails(newStep.actionType, 'directory', e.target.value)}
+                            style={{
+                              width: '100%',
+                              padding: '8px 12px',
+                              borderRadius: 4,
+                              border: '1px solid #ccc',
+                              fontSize: 14
+                            }}
+                          />
+                          <textarea
+                            placeholder="Expected output (optional)"
+                            value={newStep.details.output || ''}
+                            onChange={(e) => updateNewStepDetails(newStep.actionType, 'output', e.target.value)}
+                            rows={3}
+                            style={{
+                              width: '100%',
+                              padding: '8px 12px',
+                              borderRadius: 4,
+                              border: '1px solid #ccc',
+                              fontSize: 14,
+                              resize: 'vertical'
+                            }}
+                          />
+                          <input
+                            type="text"
+                            placeholder="Error message (optional)"
+                            value={newStep.details.error || ''}
+                            onChange={(e) => updateNewStepDetails(newStep.actionType, 'error', e.target.value)}
+                            style={{
+                              width: '100%',
+                              padding: '8px 12px',
+                              borderRadius: 4,
+                              border: '1px solid #ccc',
+                              fontSize: 14
+                            }}
+                          />
+                          <input
+                            type="number"
+                            placeholder="Exit code (optional, default: 0)"
+                            value={newStep.details.exitCode || ''}
+                            onChange={(e) => updateNewStepDetails(newStep.actionType, 'exitCode', parseInt(e.target.value) || 0)}
+                            style={{
+                              width: '100%',
+                              padding: '8px 12px',
+                              borderRadius: 4,
+                              border: '1px solid #ccc',
+                              fontSize: 14
+                            }}
+                          />
+                        </div>
+                      )}
+                      {(newStep.actionType === 'open_file' || newStep.actionType === 'create_file' || 
+                        newStep.actionType === 'delete_file' || newStep.actionType === 'close_file') && (
+                        <input
+                          type="text"
+                          placeholder="File path *"
+                          value={newStep.details.file || ''}
+                          onChange={(e) => updateNewStepDetails(newStep.actionType, 'file', e.target.value)}
+                          style={{
+                            width: '100%',
+                            padding: '8px 12px',
+                            borderRadius: 4,
+                            border: '1px solid #ccc',
+                            fontSize: 14
+                          }}
+                        />
+                      )}
+                      {newStep.actionType === 'search_string' && (
+                        <div style={{ display: 'grid', gap: 8 }}>
+                          <input
+                            type="text"
+                            placeholder="Search term *"
+                            value={newStep.details.searchKey || ''}
+                            onChange={(e) => updateNewStepDetails(newStep.actionType, 'searchKey', e.target.value)}
+                            style={{
+                              width: '100%',
+                              padding: '8px 12px',
+                              borderRadius: 4,
+                              border: '1px solid #ccc',
+                              fontSize: 14
+                            }}
+                          />
+                          <input
+                            type="text"
+                            placeholder="Search path *"
+                            value={newStep.details.path || ''}
+                            onChange={(e) => updateNewStepDetails(newStep.actionType, 'path', e.target.value)}
+                            style={{
+                              width: '100%',
+                              padding: '8px 12px',
+                              borderRadius: 4,
+                              border: '1px solid #ccc',
+                              fontSize: 14
+                            }}
+                          />
+                          <div>
+                            <label style={{ display: 'block', fontSize: 12, fontWeight: 500, marginBottom: 4, color: '#666' }}>
+                              Search Results (one per line)
+                            </label>
+                            <textarea
+                              placeholder="e.g., qiskit/circuit/parameter.py:27 - class Parameter(ParameterExpression)"
+                              value={(newStep.details.results || []).join('\n')}
+                              onChange={(e) => {
+                                const results = e.target.value.split('\n').filter(line => line.trim());
+                                updateNewStepDetails(newStep.actionType, 'results', results);
+                              }}
+                              rows={4}
+                              style={{
+                                width: '100%',
+                                padding: '8px 12px',
+                                borderRadius: 4,
+                                border: '1px solid #ccc',
+                                fontSize: 14,
+                                resize: 'vertical'
+                              }}
+                            />
+                          </div>
+                        </div>
+                      )}
+                      {newStep.actionType === 'search_web' && (
+                        <input
+                          type="text"
+                          placeholder="Search query *"
+                          value={newStep.details.query || ''}
+                          onChange={(e) => updateNewStepDetails(newStep.actionType, 'query', e.target.value)}
+                          style={{
+                            width: '100%',
+                            padding: '8px 12px',
+                            borderRadius: 4,
+                            border: '1px solid #ccc',
+                            fontSize: 14
+                          }}
+                        />
+                      )}
+                      {newStep.actionType === 'find_and_replace_code' && (
+                        <div style={{ display: 'grid', gap: 8 }}>
+                          <input
+                            type="text"
+                            placeholder="File path *"
+                            value={newStep.details.file || ''}
+                            onChange={(e) => updateNewStepDetails(newStep.actionType, 'file', e.target.value)}
+                            style={{
+                              width: '100%',
+                              padding: '8px 12px',
+                              borderRadius: 4,
+                              border: '1px solid #ccc',
+                              fontSize: 14
+                            }}
+                          />
+                          <div>
+                            <label style={{ display: 'block', fontSize: 12, fontWeight: 500, marginBottom: 4, color: '#666' }}>
+                              Code Changes
+                            </label>
+                            {(newStep.details.changes || []).map((change, index) => (
+                              <div key={index} style={{ border: '1px solid #ddd', borderRadius: 4, padding: 12, marginBottom: 8 }}>
+                                <div style={{ display: 'grid', gap: 8 }}>
+                                  <div>
+                                    <label style={{ fontSize: 12, fontWeight: 500, color: '#666' }}>Original Text:</label>
+                                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+                                      <input
+                                        type="number"
+                                        placeholder="Start line"
+                                        value={change.originalText?.startLine || ''}
+                                        onChange={(e) => {
+                                          const changes = [...(newStep.details.changes || [])];
+                                          if (!changes[index]) changes[index] = { originalText: {}, newText: {} };
+                                          if (!changes[index].originalText) changes[index].originalText = {};
+                                          changes[index].originalText.startLine = parseInt(e.target.value) || 0;
+                                          updateNewStepDetails(newStep.actionType, 'changes', changes);
+                                        }}
+                                        style={{ padding: '4px 8px', borderRadius: 4, border: '1px solid #ccc', fontSize: 12 }}
+                                      />
+                                      <input
+                                        type="number"
+                                        placeholder="End line"
+                                        value={change.originalText?.endLine || ''}
+                                        onChange={(e) => {
+                                          const changes = [...(newStep.details.changes || [])];
+                                          if (!changes[index]) changes[index] = { originalText: {}, newText: {} };
+                                          if (!changes[index].originalText) changes[index].originalText = {};
+                                          changes[index].originalText.endLine = parseInt(e.target.value) || 0;
+                                          updateNewStepDetails(newStep.actionType, 'changes', changes);
+                                        }}
+                                        style={{ padding: '4px 8px', borderRadius: 4, border: '1px solid #ccc', fontSize: 12 }}
+                                      />
+                                    </div>
+                                    <textarea
+                                      placeholder="Original code context"
+                                      value={change.originalText?.context || ''}
+                                      onChange={(e) => {
+                                        const changes = [...(newStep.details.changes || [])];
+                                        if (!changes[index]) changes[index] = { originalText: {}, newText: {} };
+                                        if (!changes[index].originalText) changes[index].originalText = {};
+                                        changes[index].originalText.context = e.target.value;
+                                        updateNewStepDetails(newStep.actionType, 'changes', changes);
+                                      }}
+                                      rows={3}
+                                      style={{ width: '100%', padding: '4px 8px', borderRadius: 4, border: '1px solid #ccc', fontSize: 12, marginTop: 4 }}
+                                    />
+                                  </div>
+                                  <div>
+                                    <label style={{ fontSize: 12, fontWeight: 500, color: '#666' }}>New Text:</label>
+                                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+                                      <input
+                                        type="number"
+                                        placeholder="Start line"
+                                        value={change.newText?.startLine || ''}
+                                        onChange={(e) => {
+                                          const changes = [...(newStep.details.changes || [])];
+                                          if (!changes[index]) changes[index] = { originalText: {}, newText: {} };
+                                          if (!changes[index].newText) changes[index].newText = {};
+                                          changes[index].newText.startLine = parseInt(e.target.value) || 0;
+                                          updateNewStepDetails(newStep.actionType, 'changes', changes);
+                                        }}
+                                        style={{ padding: '4px 8px', borderRadius: 4, border: '1px solid #ccc', fontSize: 12 }}
+                                      />
+                                      <input
+                                        type="number"
+                                        placeholder="End line"
+                                        value={change.newText?.endLine || ''}
+                                        onChange={(e) => {
+                                          const changes = [...(newStep.details.changes || [])];
+                                          if (!changes[index]) changes[index] = { originalText: {}, newText: {} };
+                                          if (!changes[index].newText) changes[index].newText = {};
+                                          changes[index].newText.endLine = parseInt(e.target.value) || 0;
+                                          updateNewStepDetails(newStep.actionType, 'changes', changes);
+                                        }}
+                                        style={{ padding: '4px 8px', borderRadius: 4, border: '1px solid #ccc', fontSize: 12 }}
+                                      />
+                                    </div>
+                                    <textarea
+                                      placeholder="New code context"
+                                      value={change.newText?.context || ''}
+                                      onChange={(e) => {
+                                        const changes = [...(newStep.details.changes || [])];
+                                        if (!changes[index]) changes[index] = { originalText: {}, newText: {} };
+                                        if (!changes[index].newText) changes[index].newText = {};
+                                        changes[index].newText.context = e.target.value;
+                                        updateNewStepDetails(newStep.actionType, 'changes', changes);
+                                      }}
+                                      rows={3}
+                                      style={{ width: '100%', padding: '4px 8px', borderRadius: 4, border: '1px solid #ccc', fontSize: 12, marginTop: 4 }}
+                                    />
+                                  </div>
+                                  <button
+                                    onClick={() => {
+                                      const changes = [...(newStep.details.changes || [])];
+                                      changes.splice(index, 1);
+                                      updateNewStepDetails(newStep.actionType, 'changes', changes);
+                                    }}
+                                    style={{
+                                      background: '#ef4444',
+                                      color: 'white',
+                                      border: 'none',
+                                      borderRadius: 4,
+                                      padding: '4px 8px',
+                                      fontSize: 12,
+                                      cursor: 'pointer',
+                                      justifySelf: 'start'
+                                    }}
+                                  >
+                                    Remove Change
+                                  </button>
+                                </div>
+                              </div>
+                            ))}
+                            <button
+                              onClick={() => {
+                                const changes = [...(newStep.details.changes || [])];
+                                changes.push({
+                                  originalText: { startLine: 0, endLine: 0, context: '' },
+                                  newText: { startLine: 0, endLine: 0, context: '' }
+                                });
+                                updateNewStepDetails(newStep.actionType, 'changes', changes);
+                              }}
+                              style={{
+                                background: '#22c55e',
+                                color: 'white',
+                                border: 'none',
+                                borderRadius: 4,
+                                padding: '8px 16px',
+                                fontSize: 12,
+                                cursor: 'pointer'
+                              }}
+                            >
+                              Add Change
+                            </button>
+                          </div>
+                        </div>
+                      )}
+                      {newStep.actionType === 'select_code_chunks' && (
+                        <input
+                          type="text"
+                          placeholder="File path *"
+                          value={newStep.details.file || ''}
+                          onChange={(e) => updateNewStepDetails(newStep.actionType, 'file', e.target.value)}
+                          style={{
+                            width: '100%',
+                            padding: '8px 12px',
+                            borderRadius: 4,
+                            border: '1px solid #ccc',
+                            fontSize: 14
+                          }}
+                        />
+                      )}
+                    </div>
+                  )}
+
+                  {/* Action (for legacy format or manual override) */}
+                  {(!sourceFormat || !sourceFormat.startsWith('annotationTrace')) && (
+                    <div>
+                      <label style={{ display: 'block', fontSize: 14, fontWeight: 500, marginBottom: 4 }}>
+                        Action *
+                      </label>
+                      <textarea
+                        value={newStep.action}
+                        onChange={(e) => setNewStep(prev => ({ ...prev, action: e.target.value }))}
+                        placeholder="Describe the action taken..."
+                        rows={3}
+                        style={{
+                          width: '100%',
+                          padding: '8px 12px',
+                          borderRadius: 4,
+                          border: '1px solid #ccc',
+                          fontSize: 14,
+                          resize: 'vertical'
+                        }}
+                      />
+                    </div>
+                  )}
+
+                  {/* Thought */}
+                  <div>
+                    <label style={{ display: 'block', fontSize: 14, fontWeight: 500, marginBottom: 4 }}>
+                      Thought {(!sourceFormat || !sourceFormat.startsWith('annotationTrace')) && '*'}
+                    </label>
+                    <textarea
+                      value={newStep.thought}
+                      onChange={(e) => setNewStep(prev => ({ ...prev, thought: e.target.value }))}
+                      placeholder="Describe your reasoning and thought process..."
+                      rows={4}
+                      style={{
+                        width: '100%',
+                        padding: '8px 12px',
+                        borderRadius: 4,
+                        border: '1px solid #ccc',
+                        fontSize: 14,
+                        resize: 'vertical'
+                      }}
+                    />
+                  </div>
+
+                  {/* Observation */}
+                  <div>
+                    <label style={{ display: 'block', fontSize: 14, fontWeight: 500, marginBottom: 4 }}>
+                      Observation {sourceFormat && sourceFormat.startsWith('annotationTrace') && newStep.actionType === 'add_thought' ? '' : '*'}
+                    </label>
+                    <textarea
+                      value={newStep.observation}
+                      onChange={(e) => setNewStep(prev => ({ ...prev, observation: e.target.value }))}
+                      placeholder="Describe what you observed as a result of the action..."
+                      rows={4}
+                      style={{
+                        width: '100%',
+                        padding: '8px 12px',
+                        borderRadius: 4,
+                        border: '1px solid #ccc',
+                        fontSize: 14,
+                        resize: 'vertical'
+                      }}
+                    />
+                  </div>
+                </div>
+
+                {/* Form Actions */}
+                <div style={{ display: 'flex', gap: 12, marginTop: 20, justifyContent: 'flex-end' }}>
+                  <button
+                    onClick={handleCancelNewStep}
+                    style={{
+                      background: '#6b7280',
+                      color: 'white',
+                      border: 'none',
+                      borderRadius: 6,
+                      padding: '10px 20px',
+                      fontWeight: 600,
+                      cursor: 'pointer',
+                      fontSize: 14
+                    }}
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    onClick={handleSaveNewStep}
+                    disabled={
+                      !newStep.partition || 
+                      (sourceFormat && sourceFormat.startsWith('annotationTrace') && newStep.actionType !== 'add_thought' && !newStep.observation.trim()) ||
+                      (!sourceFormat || !sourceFormat.startsWith('annotationTrace')) && (!newStep.action.trim() || !newStep.thought.trim() || !newStep.observation.trim())
+                    }
+                    style={{
+                      background: newStep.partition && 
+                        ((sourceFormat && sourceFormat.startsWith('annotationTrace') && (newStep.actionType === 'add_thought' || newStep.observation.trim())) ||
+                         ((!sourceFormat || !sourceFormat.startsWith('annotationTrace')) && newStep.action.trim() && newStep.thought.trim() && newStep.observation.trim()))
+                        ? '#8b5cf6' : '#9ca3af',
+                      color: 'white',
+                      border: 'none',
+                      borderRadius: 6,
+                      padding: '10px 20px',
+                      fontWeight: 600,
+                      cursor: newStep.partition && 
+                        ((sourceFormat && sourceFormat.startsWith('annotationTrace') && (newStep.actionType === 'add_thought' || newStep.observation.trim())) ||
+                         ((!sourceFormat || !sourceFormat.startsWith('annotationTrace')) && newStep.action.trim() && newStep.thought.trim() && newStep.observation.trim()))
+                        ? 'pointer' : 'not-allowed',
+                      fontSize: 14
+                    }}
+                  >
+                    Add Step
+                  </button>
+                </div>
               </div>
             )}
           </main>
