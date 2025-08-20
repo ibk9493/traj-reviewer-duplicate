@@ -355,6 +355,21 @@ input[type="file"] {
   display: flex;
   justify-content: center;
   gap: 20px;
+  flex-wrap: wrap;
+}
+
+.step-navigation-controls {
+  display: flex;
+  align-items: center;
+  gap: 24px;
+  margin-bottom: 16px;
+  flex-wrap: wrap;
+  justify-content: center;
+}
+
+.step-navigation-controls .navigation-buttons {
+  margin-top: 0;
+  margin-bottom: 0;
 }
 
 .navigation-buttons button {
